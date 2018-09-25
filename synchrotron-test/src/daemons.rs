@@ -10,6 +10,7 @@ static PORT_OFFSET: AtomicUsize = ATOMIC_USIZE_INIT;
 macro_rules! get_redis_config {
     ($($arg:tt)*) => (format!(r#"
         {{
+            "stats_port": {},
             "listeners": [
                 {{
                     "protocol": "redis",
@@ -37,8 +38,8 @@ pub struct SynchrotronRunner {
 }
 
 impl SynchrotronRunner {
-    pub fn new_redis(listen_port: u16, redis1_port: u16, redis2_port: u16) -> Result<SynchrotronRunner, Error> {
-        let full_config = get_redis_config!(listen_port, redis1_port, redis2_port);
+    pub fn new_redis(listen_port: u16, stats_port: u16, redis1_port: u16, redis2_port: u16) -> Result<SynchrotronRunner, Error> {
+        let full_config = get_redis_config!(stats_port, listen_port, redis1_port, redis2_port);
 
         // Create our configuration file from the data we got.
         let conf_dir = Builder::new()
@@ -191,12 +192,13 @@ pub fn get_redis_daemons() -> (SynchrotronRunner, RedisRunner, RedisRunner) {
     let offset = PORT_OFFSET.fetch_add(1, Ordering::SeqCst) as u16;
 
     let synchrotron_port = 43000 + offset;
-    let redis1_port = 44000 + offset;
-    let redis2_port = 45000 + offset;
+    let synchrotron_stats_port = 44000 + offset;
+    let redis1_port = 45000 + offset;
+    let redis2_port = 46000 + offset;
 
     let redis1 = RedisRunner::new(redis1_port).unwrap();
     let redis2 = RedisRunner::new(redis2_port).unwrap();
-    let synchrotron = SynchrotronRunner::new_redis(synchrotron_port, redis1_port, redis2_port).unwrap();
+    let synchrotron = SynchrotronRunner::new_redis(synchrotron_port, synchrotron_stats_port, redis1_port, redis2_port).unwrap();
 
     (synchrotron, redis1, redis2)
 }

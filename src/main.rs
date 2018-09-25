@@ -54,7 +54,8 @@ extern crate net2;
 use futures::future::{lazy, ok, Shared};
 use futures_turnstyle::{Turnstyle, Waiter};
 use signal_hook::iterator::Signals;
-use std::{error::Error, net::Shutdown, process, thread};
+use std::{error::Error, process, thread};
+use std::net::{Shutdown, SocketAddr, IpAddr, Ipv4Addr};
 use tokio::{io, net::TcpListener, prelude::*, runtime};
 
 #[macro_use]
@@ -175,7 +176,7 @@ fn run() -> i32 {
         }
 
         // Launch our stats port.
-        launch_stats(closer.clone());
+        launch_stats(configuration.stats_port, closer.clone());
 
         Ok(())
     });
@@ -192,11 +193,11 @@ fn run() -> i32 {
 // TODO: this should 100% be using either tower-web or warp.  it's super janky as-is.  it should
 // also move to the metrics module where we can simply spawn it after getting the service from a
 // builder function.
-fn launch_stats(close: Shared<Waiter>) {
+fn launch_stats(port: u16, close: Shared<Waiter>) {
     // Touch the global registry for the first time to initialize it.
     let facade = metrics::get_facade();
 
-    let addr = "127.0.0.1:9999".parse().unwrap();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
     let listener = TcpListener::bind(&addr).unwrap();
     let processor = listener
         .incoming()
