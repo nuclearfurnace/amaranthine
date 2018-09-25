@@ -19,10 +19,8 @@
 // SOFTWARE.
 use bytes::BytesMut;
 
-pub trait Keyed {
+pub trait Message {
     fn key(&self) -> &[u8];
-}
-
-pub trait IntoMutBuf {
-    fn into_mut_buf(self) -> BytesMut;
+    fn is_inline(&self) -> bool;
+    fn into_buf(self) -> BytesMut;
 }

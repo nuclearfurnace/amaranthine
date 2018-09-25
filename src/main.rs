@@ -54,8 +54,11 @@ extern crate net2;
 use futures::future::{lazy, ok, Shared};
 use futures_turnstyle::{Turnstyle, Waiter};
 use signal_hook::iterator::Signals;
-use std::{error::Error, process, thread};
-use std::net::{Shutdown, SocketAddr, IpAddr, Ipv4Addr};
+use std::{
+    error::Error,
+    net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr},
+    process, thread,
+};
 use tokio::{io, net::TcpListener, prelude::*, runtime};
 
 #[macro_use]

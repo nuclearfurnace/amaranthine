@@ -22,6 +22,7 @@ use backend::{
     processor::{ProcessorError, RequestProcessor, TcpStreamFuture},
 };
 use bytes::BytesMut;
+use common::Message;
 use futures::{future::ok, prelude::*};
 use itoa;
 use protocol::{
@@ -79,7 +80,14 @@ fn redis_fragment_messages(msgs: Vec<RedisMessage>) -> Result<Vec<(MessageState,
     for msg in msgs {
         match redis_is_multi_message(&msg) {
             // This message isn't fragmentable, so it passes through untouched.
-            false => fragments.push((MessageState::Standalone, msg)),
+            false => {
+                let state = if msg.is_inline() {
+                    MessageState::Inline
+                } else {
+                    MessageState::Standalone
+                };
+                fragments.push((state, msg));
+            },
             true => {
                 match msg {
                     RedisMessage::Bulk(_, mut args) => {

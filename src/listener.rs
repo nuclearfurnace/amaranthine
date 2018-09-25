@@ -21,7 +21,7 @@ use backend::{
     distributor, hasher, message_queue::MessageQueue, pool::BackendPool, processor::RequestProcessor,
     redis::RedisRequestProcessor,
 };
-use common::{IntoMutBuf, Keyed};
+use common::Message;
 use conf::ListenerConfiguration;
 use futures::{
     future::{lazy, ok, Shared},
@@ -45,7 +45,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     reactor,
 };
-use util::{get_batch_size, Sizable, StreamExt};
+use util::StreamExt;
 
 type GenericRuntimeFuture = Box<Future<Item = (), Error = ()> + Sync + Send + 'static>;
 
@@ -85,7 +85,7 @@ fn routing_from_config<T>(
 ) -> Result<GenericRuntimeFuture, Error>
 where
     T: RequestProcessor + Clone + Sync + Send + 'static,
-    T::Message: Keyed + Sizable + IntoMutBuf + Clone + Send + 'static,
+    T::Message: Message + Send + 'static,
     T::ClientReader: Stream<Item = T::Message, Error = ProtocolError> + Send + 'static,
     T::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
@@ -148,7 +148,7 @@ fn get_fixed_router<T>(
 ) -> Result<GenericRuntimeFuture, Error>
 where
     T: RequestProcessor + Clone + Sync + Send + 'static,
-    T::Message: Keyed + Sizable + IntoMutBuf + Clone + Send + 'static,
+    T::Message: Message + Send + 'static,
     T::ClientReader: Stream<Item = T::Message, Error = ProtocolError> + Send + 'static,
     T::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
@@ -166,7 +166,7 @@ fn build_router_chain<T, R>(
 ) -> Result<GenericRuntimeFuture, Error>
 where
     T: RequestProcessor + Clone + Sync + Send + 'static,
-    T::Message: Keyed + Sizable + IntoMutBuf + Clone + Send + 'static,
+    T::Message: Message + Send + 'static,
     T::ClientReader: Stream<Item = T::Message, Error = ProtocolError> + Send + 'static,
     T::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
     R: Router<T> + Clone + Sync + Send + 'static,
@@ -219,9 +219,6 @@ where
                 }).batch(128)
                 .fold((router, mqcp, metrics), |(router, mut mqcp, mut metrics), req| {
                     metrics.update_count(Metrics::ServerMessagesReceived, req.len() as i64);
-
-                    let batch_size = get_batch_size(&req);
-                    metrics.update_count(Metrics::ServerBytesReceived, batch_size as i64);
 
                     let batch_start = Instant::now();
                     mqcp.enqueue(req)

@@ -20,13 +20,12 @@
 use backend::message_queue::QueuedMessage;
 use btoi::btoi;
 use bytes::{BufMut, BytesMut};
-use common::{IntoMutBuf, Keyed};
+use common::Message;
 use futures::prelude::*;
 use metrics::{self, MetricSink, Metrics};
 use protocol::errors::ProtocolError;
 use std::error::Error;
 use tokio::io::{write_all, AsyncRead, AsyncWrite};
-use util::Sizable;
 
 const REDIS_COMMAND_ERROR: u8 = b'-';
 const REDIS_COMMAND_STATUS: u8 = b'+';
@@ -165,7 +164,7 @@ impl RedisMessage {
     }
 }
 
-impl Keyed for RedisMessage {
+impl Message for RedisMessage {
     fn key(&self) -> &[u8] {
         match self {
             RedisMessage::Bulk(_, ref args) => {
@@ -188,26 +187,16 @@ impl Keyed for RedisMessage {
             _ => panic!("message should be multi-bulk or data!"),
         }
     }
-}
 
-impl Sizable for RedisMessage {
-    fn size(&self) -> usize {
+    fn is_inline(&self) -> bool {
         match self {
-            RedisMessage::Null => REDIS_NULL_BUF[..].len(),
-            RedisMessage::OK => REDIS_OK_BUF[..].len(),
-            RedisMessage::Status(buf, _) => buf.len(),
-            RedisMessage::Error(buf, _) => buf.len(),
-            RedisMessage::Integer(buf, _) => buf.len(),
-            RedisMessage::Data(buf, _) => buf.len(),
-            RedisMessage::Bulk(buf, _) => buf.len(),
-            RedisMessage::Ping => 6,
-            RedisMessage::Quit => 6,
+            RedisMessage::Data(_, _) => false,
+            RedisMessage::Bulk(_, _) => false,
+            _ => true,
         }
     }
-}
 
-impl IntoMutBuf for RedisMessage {
-    fn into_mut_buf(self) -> BytesMut { self.into_resp() }
+    fn into_buf(self) -> BytesMut { self.into_resp() }
 }
 
 impl<R> RedisMessageStream<R>
@@ -225,7 +214,7 @@ where
 
     fn fill_read_buf(&mut self) -> Poll<(), ProtocolError> {
         loop {
-            self.rd.reserve(4096);
+            self.rd.reserve(16384);
 
             let n = try_ready!(self.rx.read_buf(&mut self.rd));
             if n == 0 {
@@ -294,7 +283,7 @@ where
 
     fn fill_read_buf(&mut self) -> Poll<(), ProtocolError> {
         loop {
-            self.rd.reserve(1024);
+            self.rd.reserve(16384);
 
             let n = try_ready!(self.rx.as_mut().unwrap().read_buf(&mut self.rd));
             self.bytes_read += n;

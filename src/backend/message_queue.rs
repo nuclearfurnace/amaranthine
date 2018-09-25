@@ -19,7 +19,7 @@
 // SOFTWARE.
 use backend::processor::{ProcessorError, RequestProcessor};
 use bytes::BytesMut;
-use common::{IntoMutBuf, Keyed};
+use common::Message;
 use futures::{
     future::ok,
     prelude::*,
@@ -33,12 +33,18 @@ use slab::Slab;
 use std::collections::VecDeque;
 use tokio::io::{write_all, AsyncWrite};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum MessageState {
     /// An unfragmented, standalone message.
     ///
     /// A filled variant of this state can be immediately sent off to the client.
     Standalone,
+
+    /// An unfragmented, standalone message that is _also_ immediately available.
+    ///
+    /// While normal messages have to be processed before a response, these messages are available
+    /// to send as soon as they're enqueued.
+    Inline,
 
     /// A fragmented message.
     ///
@@ -76,11 +82,15 @@ pub struct QueuedMessage<M> {
     response_tx: UnboundedSender<(usize, M)>,
 }
 
-impl<M> Keyed for QueuedMessage<M>
+impl<M> Message for QueuedMessage<M>
 where
-    M: Keyed,
+    M: Message,
 {
     fn key(&self) -> &[u8] { self.msg.as_ref().unwrap().key() }
+
+    fn is_inline(&self) -> bool { self.msg.as_ref().unwrap().is_inline() }
+
+    fn into_buf(mut self) -> BytesMut { self.msg.take().unwrap().into_buf() }
 }
 
 impl<M> QueuedMessage<M> {
@@ -141,7 +151,7 @@ where
 impl<P> MessageQueue<P>
 where
     P: RequestProcessor + Send + 'static,
-    P::Message: IntoMutBuf,
+    P::Message: Message,
 {
     pub fn new<T>(processor: P, tx: T) -> (MessageQueue<P>, MessageQueueControlPlane<P>)
     where
@@ -227,6 +237,7 @@ where
                     Some(_) => {
                         match state {
                             MessageState::Standalone => true,
+                            MessageState::Inline => true,
                             MessageState::StreamingFragmented(_) => true,
                             MessageState::Fragmented(_, _, _) => false,
                         }
@@ -241,14 +252,14 @@ where
             let slot = self.slots.remove(slot_id).unwrap();
 
             let buf = match state {
-                MessageState::Standalone => slot.into_mut_buf(),
+                MessageState::Standalone | MessageState::Inline => slot.into_buf(),
                 MessageState::StreamingFragmented(header) => {
                     match header {
                         Some(mut header_buf) => {
-                            header_buf.unsplit(slot.into_mut_buf());
+                            header_buf.unsplit(slot.into_buf());
                             header_buf
                         },
-                        None => slot.into_mut_buf(),
+                        None => slot.into_buf(),
                     }
                 },
                 _ => unreachable!(),
@@ -285,14 +296,14 @@ where
         }
 
         let msg = self.processor.defragment_messages(fragments)?;
-        Ok(Async::Ready(Some(msg.into_mut_buf())))
+        Ok(Async::Ready(Some(msg.into_buf())))
     }
 }
 
 impl<P> Future for MessageQueue<P>
 where
     P: RequestProcessor + Send + 'static,
-    P::Message: IntoMutBuf,
+    P::Message: Message,
 {
     type Error = ();
     type Item = ();
@@ -325,13 +336,18 @@ where
 
                                     let mut qmsgs = Vec::new();
                                     for (msg_state, msg) in fmsgs {
-                                        let slot_id = self.slots.insert(None);
-                                        self.slot_order.push_back((slot_id, msg_state));
-                                        qmsgs.push(QueuedMessage::new(
-                                            msg,
-                                            slot_id,
-                                            self.responses_tx.as_ref().unwrap().clone(),
-                                        ));
+                                        if msg_state == MessageState::Inline {
+                                            let slot_id = self.slots.insert(Some(msg));
+                                            self.slot_order.push_back((slot_id, msg_state));
+                                        } else {
+                                            let slot_id = self.slots.insert(None);
+                                            self.slot_order.push_back((slot_id, msg_state));
+                                            qmsgs.push(QueuedMessage::new(
+                                                msg,
+                                                slot_id,
+                                                self.responses_tx.as_ref().unwrap().clone(),
+                                            ));
+                                        }
                                     }
 
                                     match tx.send(qmsgs) {

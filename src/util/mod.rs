@@ -49,16 +49,3 @@ pub trait StreamExt: Stream {
         batch::new(self, capacity)
     }
 }
-
-/// Calculates the size of bytes for all items in a batch.
-pub fn get_batch_size<T>(batch: &[T]) -> usize
-where
-    T: Sizable,
-{
-    batch.into_iter().fold(0, |acc, x| acc + x.size())
-}
-
-/// A type that can report back its own size in bytes.
-pub trait Sizable {
-    fn size(&self) -> usize;
-}

@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 use backend::{message_queue::QueuedMessage, pool::BackendPool, processor::RequestProcessor};
-use common::Keyed;
+use common::Message;
 use futures::prelude::*;
 use protocol::errors::ProtocolError;
 use routing::{Router, RouterError};
@@ -38,7 +38,7 @@ where
 impl<T> FixedRouter<T>
 where
     T: RequestProcessor + Clone + Send + 'static,
-    T::Message: Keyed + Send,
+    T::Message: Message + Send,
     T::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
     pub fn new(processor: T, pool: Arc<BackendPool<T>>) -> FixedRouter<T> { FixedRouter { processor, pool } }
@@ -47,7 +47,7 @@ where
 impl<T> Router<T> for FixedRouter<T>
 where
     T: RequestProcessor + Clone + Send + 'static,
-    T::Message: Keyed + Send,
+    T::Message: Message + Send,
     T::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
     fn route(&self, req: Vec<QueuedMessage<T::Message>>) -> Result<(), RouterError> {
