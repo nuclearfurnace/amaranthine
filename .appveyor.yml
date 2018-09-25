@@ -1,45 +1,21 @@
 environment:
   global:
     RUST_VERSION: nightly
-
-    # TODO Update this to match the name of your project.
     CRATE_NAME: synchrotron
 
   matrix:
-    # macOS
-    - TARGET: i686-apple-darwin
-    - TARGET: x86_64-apple-darwin
-
-    # FreeBSD
-    - TARGET: i686-unknown-freebsd
-    - TARGET: x86_64-unknown-freebsd
-    - TARGET: x86_64-unknown-netbsd
-
-    # Linux
-    - TARGET: i686-unknown-linux-gnu
-    - TARGET: x86_64-unknown-linux-gnu
-    - TARGET: aarch64-unknown-linux-gnu
-    - TARGET: arm-unknown-linux-gnueabi
-    - TARGET: armv7-unknown-linux-gnueabihf
-
-    # Windows
     - TARGET: i686-pc-windows-msvc
+      platform: x86
     - TARGET: x86_64-pc-windows-msvc
+      platform: x64
 
 install:
-  - ps: >-
-      If ($Env:TARGET -eq 'x86_64-pc-windows-gnu') {
-        $Env:PATH += ';C:\msys64\mingw64\bin'
-      } ElseIf ($Env:TARGET -eq 'i686-pc-windows-gnu') {
-        $Env:PATH += ';C:\msys64\mingw32\bin'
-      }
-  - curl -sSf -o rustup-init.exe https://win.rustup.rs/
+  - appveyor-retry appveyor DownloadFile https://win.rustup.rs/ -FileName rustup-init.exe
   - rustup-init.exe -y --default-host %TARGET% --default-toolchain %RUST_VERSION%
   - set PATH=%PATH%;C:\Users\appveyor\.cargo\bin
   - rustc -Vv
   - cargo -V
 
-# TODO This is the "test phase", tweak it as you see fit
 test_script:
   # we don't run the "test phase" when doing deploys
   - if [%APPVEYOR_REPO_TAG%]==[false] (
@@ -52,14 +28,13 @@ test_script:
     )
 
 before_deploy:
-  # TODO Update this to build the artifacts that matter to you
   - cargo rustc --target %TARGET% --release --bin synchrotron -- -C lto
   - ps: ci\before_deploy.ps1
 
 deploy:
   artifact: /.*\.zip/
   auth_token:
-    secure: LATdgCL3RMQ9Khb6arsbM2VzZMPUe4N+dYWvmr40sGtvM8Qv4u+laaZLaumEP+lp
+    secure:
   description: ''
   on:
     RUST_VERSION: nightly
