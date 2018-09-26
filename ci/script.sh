@@ -8,6 +8,7 @@ main() {
     fi
 
     cross test --target $TARGET
+    scripts/run-integration-tests.sh
 }
 
 # we don't run the "test phase" when doing deploys
