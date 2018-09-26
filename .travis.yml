@@ -25,6 +25,7 @@ matrix:
       os: osx
 
 before_install:
+  - /usr/bin/which redis-server
   - set -e
   - rustup self update
   - rustup install nightly
