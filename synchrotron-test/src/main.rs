@@ -76,7 +76,6 @@ mod redis_tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_quit_drops_conn() {
         let (sd, _rd1, _rd2) = get_redis_daemons();
 
@@ -94,6 +93,9 @@ mod redis_tests {
         // We still have our sending side open, so we can send the PING command, but trying to
         // receive the command should fail.
         let _ = conn.send_packed_command(b"ping\r\n").unwrap();
-        let _ = conn.recv_response().unwrap();
+        match conn.recv_response().err() {
+            Some(e) => assert!(e.is_connection_dropped()),
+            None => panic!("call after quit should yield error"),
+        }
     }
 }
