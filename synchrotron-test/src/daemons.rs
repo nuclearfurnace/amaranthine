@@ -1,4 +1,5 @@
 use std::str;
+use std::env;
 use std::fs::File;
 use std::io::{Error, Write};
 use std::process::{Command, Child, Stdio};
@@ -91,8 +92,13 @@ pub struct RedisRunner {
 
 impl RedisRunner {
     pub fn new(port: u16) -> Result<RedisRunner, Error> {
+        let redis_bin = match env::var("REDIS_BIN") {
+            Ok(s) => s,
+            Err(_) => "/usr/local/bin/redis-server".to_owned(),
+        };
+
         // Launch Redis on the specified port.
-        let handle = Command::new("/usr/local/bin/redis-server")
+        let handle = Command::new(redis_bin)
             .arg("--port")
             .arg(port.to_string())
             .stdout(Stdio::null())
