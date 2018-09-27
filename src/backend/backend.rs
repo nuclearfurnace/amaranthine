@@ -17,7 +17,10 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::{message_queue::QueuedMessage, processor::RequestProcessor};
+use backend::{
+    distributor::BackendDescriptor, health::BackendHealth, message_queue::QueuedMessage, processor::RequestProcessor,
+};
+use errors::CreationError;
 use futures::{
     future::{ok, Either, Shared},
     prelude::*,
@@ -25,14 +28,27 @@ use futures::{
 };
 use futures_turnstyle::Waiter;
 use protocol::errors::ProtocolError;
-use std::net::SocketAddr;
+use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
 use tokio::net::TcpStream;
 use util::{WorkQueue, Worker};
 
+/// Commands sent by backend connections to their backend supervisor.
 pub enum BackendCommand {
+    /// The connection has encountered an error.
+    ///
+    /// This lets the backend supervisor know that the connection has terminated and will need to
+    /// be replaced, etc.
     Error,
 }
 
+/// A backend connection.
+///
+/// This represents a one-to-one mapping with a TCP connection to the given backend server.  This
+/// connection will independently poll the work queue for the backend and run requests when
+/// available.
+///
+/// If a backend connection encounters an error, it will terminate and notify its backend
+/// supervisor, so that it can be replaced.
 struct BackendConnection<P>
 where
     P: RequestProcessor,
@@ -91,12 +107,22 @@ where
                 },
                 Ok(Async::Ready(None)) => return Ok(Async::Ready(())),
                 Ok(Async::NotReady) => return Ok(Async::NotReady),
-                Err(e) => {
+                Err(_) => {
                     let _ = self.command_tx.unbounded_send(BackendCommand::Error);
-                    return Err(e);
+                    return Err(());
                 },
             }
         }
+    }
+}
+
+impl<P> Drop for BackendConnection<P>
+where
+    P: RequestProcessor,
+    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+{
+    fn drop(&mut self) {
+        trace!("[backend connection] dropping");
     }
 }
 
@@ -112,11 +138,14 @@ where
 /// other.
 pub struct BackendSupervisor<P>
 where
-    P: RequestProcessor + Clone + Send,
+    P: RequestProcessor + Clone + Send + 'static,
+    P::Message: Send,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
     processor: P,
     worker: Worker<Vec<QueuedMessage<P::Message>>>,
+    health: Arc<BackendHealth>,
+    updates_tx: mpsc::UnboundedSender<()>,
     command_rx: mpsc::UnboundedReceiver<BackendCommand>,
     command_tx: mpsc::UnboundedSender<BackendCommand>,
 
@@ -149,12 +178,17 @@ where
                     match cmd {
                         BackendCommand::Error => {
                             self.conn_count -= 1;
+                            self.health.increment_error();
                         },
                     }
                 },
                 Ok(Async::NotReady) => break,
                 _ => return Err(()),
             }
+        }
+
+        if !self.health.is_healthy() {
+            let _ = self.updates_tx.unbounded_send(());
         }
 
         // Make sure all connections have been spawned.
@@ -177,12 +211,24 @@ where
     }
 }
 
+impl<P> Drop for BackendSupervisor<P>
+where
+    P: RequestProcessor + Clone + Send + 'static,
+    P::Message: Send,
+    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+{
+    fn drop(&mut self) {
+        trace!("[backend supervisor] dropping");
+    }
+}
+
 fn new_supervisor<P>(
-    addr: SocketAddr, processor: P, worker: Worker<Vec<QueuedMessage<P::Message>>>, conn_limit: usize,
-    close: Shared<Waiter>,
+    addr: SocketAddr, processor: P, worker: Worker<Vec<QueuedMessage<P::Message>>>, health: Arc<BackendHealth>,
+    conn_limit: usize, updates_tx: mpsc::UnboundedSender<()>, close: Shared<Waiter>,
 ) -> BackendSupervisor<P>
 where
     P: RequestProcessor + Clone + Send,
+    P::Message: Send,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
     let (command_tx, command_rx) = mpsc::unbounded();
@@ -190,6 +236,8 @@ where
     BackendSupervisor {
         processor,
         worker,
+        health,
+        updates_tx,
 
         command_rx,
         command_tx,
@@ -216,26 +264,78 @@ where
 pub struct Backend<P>
 where
     P: RequestProcessor + Clone + Send,
+    P::Message: Send,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
+    health: Arc<BackendHealth>,
     work_queue: WorkQueue<Vec<QueuedMessage<P::Message>>>,
 }
 
 impl<P> Backend<P>
 where
     P: RequestProcessor + Clone + Send,
+    P::Message: Send,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
     pub fn new(
-        addr: SocketAddr, processor: P, conn_limit: usize, close: Shared<Waiter>,
-    ) -> (Backend<P>, BackendSupervisor<P>) {
+        addr: SocketAddr, processor: P, mut options: HashMap<String, String>, updates_tx: mpsc::UnboundedSender<()>,
+        close: Shared<Waiter>,
+    ) -> Result<(Backend<P>, BackendSupervisor<P>), CreationError> {
+        let conn_limit_raw = options.entry("conns".to_owned()).or_insert_with(|| "1".to_owned());
+        let conn_limit = usize::from_str(conn_limit_raw.as_str())
+            .map_err(|_| CreationError::InvalidParameter("options.conns".to_string()))?;
+        debug!("[listener] using connection limit of '{}'", conn_limit);
+
+        let cooloff_enabled_raw = options
+            .entry("cooloff_enabled".to_owned())
+            .or_insert_with(|| "true".to_owned());
+        let cooloff_enabled = bool::from_str(cooloff_enabled_raw.as_str())
+            .map_err(|_| CreationError::InvalidParameter("options.cooloff_enabled".to_string()))?;
+
+        let cooloff_timeout_ms_raw = options
+            .entry("cooloff_timeout_ms".to_owned())
+            .or_insert_with(|| "10000".to_owned());
+        let cooloff_timeout_ms = u64::from_str(cooloff_timeout_ms_raw.as_str())
+            .map_err(|_| CreationError::InvalidParameter("options.cooloff_timeout_ms".to_string()))?;
+
+        let cooloff_error_limit_raw = options
+            .entry("cooloff_error_limit".to_owned())
+            .or_insert_with(|| "5".to_owned());
+        let cooloff_error_limit = usize::from_str(cooloff_error_limit_raw.as_str())
+            .map_err(|_| CreationError::InvalidParameter("options.cooloff_error_limit".to_string()))?;
+
+        let health = Arc::new(BackendHealth::new(
+            cooloff_enabled,
+            cooloff_timeout_ms,
+            cooloff_error_limit,
+            updates_tx.clone(),
+        ));
+
         let work_queue = WorkQueue::new();
         let worker = work_queue.worker();
-        let backend = Backend { work_queue };
-        let runner = new_supervisor(addr, processor, worker, conn_limit, close);
+        let backend = Backend {
+            work_queue,
+            health: health.clone(),
+        };
+        let runner = new_supervisor(addr, processor, worker, health, conn_limit, updates_tx, close);
 
-        (backend, runner)
+        Ok((backend, runner))
     }
 
     pub fn submit(&self, batch: Vec<QueuedMessage<P::Message>>) { self.work_queue.send(batch) }
+
+    pub fn is_healthy(&self) -> bool { self.health.is_healthy() }
+
+    pub fn get_descriptor(&self) -> BackendDescriptor { BackendDescriptor {} }
+}
+
+impl<P> Drop for Backend<P>
+where
+    P: RequestProcessor + Clone + Send,
+    P::Message: Send,
+    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+{
+    fn drop(&mut self) {
+        trace!("[backend] dropping");
+    }
 }

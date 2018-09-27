@@ -25,7 +25,7 @@ use futures::future::{Either, FutureResult};
 use std::{error::Error, io};
 use tokio::{
     io::ReadHalf,
-    net::{ConnectFuture, TcpStream},
+    net::tcp::{ConnectFuture, TcpStream},
 };
 
 /// An existing or pending TcpStream.
@@ -42,6 +42,7 @@ pub trait RequestProcessor {
     fn defragment_messages(&self, Vec<(MessageState, Self::Message)>) -> Result<Self::Message, ProcessorError>;
 
     fn get_error_message(&self, Box<Error>) -> Self::Message;
+    fn get_error_message_str(&self, &str) -> Self::Message;
 
     fn get_read_stream(&self, ReadHalf<TcpStream>) -> Self::ClientReader;
 

@@ -18,11 +18,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 use backend::{
-    distributor, hasher, message_queue::MessageQueue, pool::BackendPool, processor::RequestProcessor,
-    redis::RedisRequestProcessor,
+    message_queue::MessageQueue, pool::BackendPool, processor::RequestProcessor, redis::RedisRequestProcessor,
 };
 use common::Message;
 use conf::ListenerConfiguration;
+use errors::CreationError;
 use futures::{
     future::{lazy, ok, Shared},
     prelude::*,
@@ -32,14 +32,7 @@ use metrics::{self, Metrics};
 use net2::TcpBuilder;
 use protocol::errors::ProtocolError;
 use routing::{FixedRouter, Router};
-use std::{
-    collections::HashMap,
-    io::{Error, ErrorKind},
-    net::SocketAddr,
-    str::FromStr,
-    sync::Arc,
-    time::Instant,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 use tokio::{
     io::{self, AsyncRead},
     net::{TcpListener, TcpStream},
@@ -47,14 +40,16 @@ use tokio::{
 };
 use util::StreamExt;
 
-type GenericRuntimeFuture = Box<Future<Item = (), Error = ()> + Sync + Send + 'static>;
+type GenericRuntimeFuture = Box<Future<Item = (), Error = ()> + Send + 'static>;
 
 /// Creates a listener from the given configuration.
 ///
 /// The listener will spawn a socket for accepting client connections, and when a client connects,
 /// spawn a task to process all of the messages from that client until the client disconnects or
 /// there is an unrecoverable connection/protocol error.
-pub fn from_config(config: ListenerConfiguration, close: Shared<Waiter>) -> Result<GenericRuntimeFuture, Error> {
+pub fn from_config(
+    config: ListenerConfiguration, close: Shared<Waiter>,
+) -> Result<GenericRuntimeFuture, CreationError> {
     // Create the actual listener proper.
     let listen_address = config.address.clone();
     let listener = get_listener(&listen_address).expect("failed to create the TCP listener");
@@ -62,32 +57,32 @@ pub fn from_config(config: ListenerConfiguration, close: Shared<Waiter>) -> Resu
     // Get the correct handler based on protocol.
     let protocol = config.protocol.to_lowercase();
     let handler = match protocol.as_str() {
-        "redis" => routing_from_config(config, listener, close.clone(), RedisRequestProcessor::new())?,
-        s => panic!("unknown protocol type: {}", s),
-    };
+        "redis" => routing_from_config(config, listener, close.clone(), RedisRequestProcessor::new()),
+        s => Err(CreationError::InvalidResource(format!("unknown cache protocol: {}", s))),
+    }?;
 
     // Make sure our handlers close out when told.
     let listen_address2 = listen_address.clone();
     let wrapped = lazy(move || {
-        info!("[listener] starting listener '{}'...", listen_address);
+        info!("[listener] starting listener '{}'", listen_address);
         ok(())
     }).and_then(|_| handler)
     .select2(close)
     .then(move |_| {
-        info!("[pool] shutting down listener '{}'", listen_address2);
+        info!("[listener] shutting down listener '{}'", listen_address2);
         ok(())
     });
     Ok(Box::new(wrapped))
 }
 
-fn routing_from_config<T>(
-    config: ListenerConfiguration, listener: TcpListener, close: Shared<Waiter>, processor: T,
-) -> Result<GenericRuntimeFuture, Error>
+fn routing_from_config<P>(
+    config: ListenerConfiguration, listener: TcpListener, close: Shared<Waiter>, processor: P,
+) -> Result<GenericRuntimeFuture, CreationError>
 where
-    T: RequestProcessor + Clone + Sync + Send + 'static,
-    T::Message: Message + Send + 'static,
-    T::ClientReader: Stream<Item = T::Message, Error = ProtocolError> + Send + 'static,
-    T::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    P: RequestProcessor + Clone + Send + 'static,
+    P::Message: Message + Send + 'static,
+    P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
+    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
     let mut pools = HashMap::new();
     let pool_configs = config.pools.clone();
@@ -98,36 +93,9 @@ where
             config.address.clone()
         );
 
-        let mut opts = pool_config.options.unwrap_or_else(HashMap::new);
+        let opts = pool_config.options.unwrap_or_else(HashMap::new);
 
-        let dist_type = opts
-            .entry("distribution".to_owned())
-            .or_insert_with(|| "modulo".to_owned())
-            .to_lowercase();
-        let distributor = distributor::configure_distributor(&dist_type);
-        debug!("[listener] using distributor '{}'", dist_type);
-
-        let hash_type = opts
-            .entry("hash".to_owned())
-            .or_insert_with(|| "fnv1a_64".to_owned())
-            .to_lowercase();
-        let hasher = hasher::configure_hasher(&hash_type);
-        debug!("[listener] using hasher '{}'", hash_type);
-
-        let conn_limit_raw = opts.entry("conns".to_owned()).or_insert_with(|| "1".to_owned());
-        let conn_limit = usize::from_str(conn_limit_raw.as_str())
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "failed to parse connection limit value"))?;
-
-        debug!("[listener] using connection limit of '{}'", conn_limit);
-
-        let pool = Arc::new(BackendPool::new(
-            &pool_config.addresses,
-            processor.clone(),
-            distributor,
-            hasher,
-            conn_limit,
-            close.clone(),
-        ));
+        let pool = BackendPool::new(&pool_config.addresses, processor.clone(), opts, close.clone())?;
         pools.insert(pool_name, pool);
     }
 
@@ -139,43 +107,44 @@ where
         .to_lowercase();
     match route_type.as_str() {
         "fixed" => get_fixed_router(listener, pools, processor, close.clone()),
-        x => panic!("unknown route type '{}'", x),
+        x => Err(CreationError::InvalidResource(format!("unknown route type '{}'", x))),
     }
 }
 
-fn get_fixed_router<T>(
-    listener: TcpListener, pools: HashMap<String, Arc<BackendPool<T>>>, processor: T, close: Shared<Waiter>,
-) -> Result<GenericRuntimeFuture, Error>
+fn get_fixed_router<P>(
+    listener: TcpListener, pools: HashMap<String, Arc<BackendPool<P>>>, processor: P, close: Shared<Waiter>,
+) -> Result<GenericRuntimeFuture, CreationError>
 where
-    T: RequestProcessor + Clone + Sync + Send + 'static,
-    T::Message: Message + Send + 'static,
-    T::ClientReader: Stream<Item = T::Message, Error = ProtocolError> + Send + 'static,
-    T::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    P: RequestProcessor + Clone + Send + 'static,
+    P::Message: Message + Send + 'static,
+    P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
+    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
     // Construct an instance of our router.
     let default_pool = pools
         .get("default")
-        .ok_or_else(|| Error::new(ErrorKind::Other, "no default pool configured for fixed router"))?;
+        .ok_or_else(|| CreationError::InvalidResource("no default pool configured for fixed router".to_string()))?;
     let router = FixedRouter::new(processor.clone(), default_pool.clone());
 
     build_router_chain(listener, processor, router, close)
 }
 
-fn build_router_chain<T, R>(
-    listener: TcpListener, processor: T, router: R, close: Shared<Waiter>,
-) -> Result<GenericRuntimeFuture, Error>
+fn build_router_chain<P, R>(
+    listener: TcpListener, processor: P, router: R, close: Shared<Waiter>,
+) -> Result<GenericRuntimeFuture, CreationError>
 where
-    T: RequestProcessor + Clone + Sync + Send + 'static,
-    T::Message: Message + Send + 'static,
-    T::ClientReader: Stream<Item = T::Message, Error = ProtocolError> + Send + 'static,
-    T::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
-    R: Router<T> + Clone + Sync + Send + 'static,
+    P: RequestProcessor + Clone + Send + 'static,
+    P::Message: Message + Send + 'static,
+    P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
+    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    R: Router<P> + Clone + Send + 'static,
 {
     let close2 = close.clone();
 
     let task = listener
         .incoming()
         .for_each(move |client| {
+            debug!("[client] connected");
             let mut metrics = metrics::get_sink();
             metrics.increment(Metrics::ClientsConnected);
 
@@ -234,7 +203,7 @@ where
                             (router, mqcp, metrics)
                         })
                 }).and_then(|(_, _, mut metrics)| {
-                    info!("[client] disconnected");
+                    debug!("[client] disconnected");
                     metrics.decrement(Metrics::ClientsConnected);
                     ok(())
                 }).select2(close)
@@ -263,7 +232,7 @@ fn get_listener(addr_str: &str) -> io::Result<TcpListener> {
     builder.bind(addr)?;
     builder
         .listen(1024)
-        .and_then(|l| TcpListener::from_std(l, &reactor::Handle::current()))
+        .and_then(|l| TcpListener::from_std(l, &reactor::Handle::default()))
 }
 
 #[cfg(unix)]

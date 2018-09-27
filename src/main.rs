@@ -30,6 +30,7 @@ extern crate lazy_static;
 
 #[macro_use]
 extern crate crossbeam;
+extern crate parking_lot;
 
 extern crate config;
 extern crate crypto;
@@ -55,7 +56,6 @@ use futures::future::{lazy, ok, Shared};
 use futures_turnstyle::{Turnstyle, Waiter};
 use signal_hook::iterator::Signals;
 use std::{
-    error::Error,
     net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr},
     process, thread,
 };
@@ -63,7 +63,7 @@ use tokio::{io, net::TcpListener, prelude::*, runtime};
 
 #[macro_use]
 extern crate log;
-#[macro_use(slog_o, slog_kv)]
+#[macro_use(slog_o)]
 extern crate slog;
 extern crate slog_async;
 extern crate slog_scope;
@@ -87,6 +87,7 @@ extern crate spectral;
 mod backend;
 mod common;
 mod conf;
+mod errors;
 mod listener;
 mod metrics;
 mod protocol;
@@ -159,7 +160,7 @@ fn run() -> i32 {
             let result = listener.as_ref();
             if result.is_err() {
                 let error = result.err().unwrap();
-                errors.push(error.description().to_owned());
+                errors.push(error.to_string());
             }
         }
 

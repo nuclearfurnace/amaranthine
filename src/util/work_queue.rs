@@ -31,9 +31,6 @@ use std::{
 };
 
 /// A single-producer-multiple-consumer queue used for distributing work to multiple workers.
-///
-/// Based on crossbeam-channel, this queue is futures-aware.  The sending side is not `Sink`
-/// compatible, although the receiving side is `Stream` compatible.
 pub struct WorkQueue<T> {
     work_tx: ChannelSender<T>,
     work_rx: ChannelReceiver<T>,
@@ -42,6 +39,10 @@ pub struct WorkQueue<T> {
     waiters: MsQueue<Weak<Option<Task>>>,
 }
 
+/// Worker side of `WorkQueue`.
+///
+/// Workers can pull items from the queue.  If no items are available, the worker will be parked
+/// and notified when an item is available, in FIFO order.
 pub struct Worker<T> {
     work_rx: ChannelReceiver<T>,
     wait_tx: ChannelSender<Weak<Option<Task>>>,
@@ -140,13 +141,10 @@ impl<T> Stream for Worker<T> {
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         select! {
-            recv(self.work_rx, msg) => match msg {
-                Some(msg) => return Ok(Async::Ready(Some(msg))),
-                None => return Ok(Async::Ready(None)),
-            },
+            recv(self.work_rx, msg) => Ok(Async::Ready(msg)),
             default => {
                 self.park();
-                return Ok(Async::NotReady)
+                Ok(Async::NotReady)
             },
         }
     }

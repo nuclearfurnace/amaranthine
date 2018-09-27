@@ -4,6 +4,8 @@ use std::io::{Error, Write};
 use std::process::{Command, Child, Stdio};
 use tempfile::{Builder, TempDir};
 use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
+use std::thread;
+use std::time::Duration;
 
 static PORT_OFFSET: AtomicUsize = ATOMIC_USIZE_INIT;
 
@@ -17,7 +19,10 @@ macro_rules! get_redis_config {
                     "address": "127.0.0.1:{}",
                     "pools": {{
                         "default": {{
-                            "addresses": ["127.0.0.1:{}", "127.0.0.1:{}"]
+                            "addresses": ["127.0.0.1:{}", "127.0.0.1:{}"],
+                            "options": {{
+                                "cooloff_timeout_ms": "2000"
+                            }}
                         }}
                     }},
                     "routing": {{
@@ -133,6 +138,8 @@ fn wait_until<F>(f: F)
         if status {
             return;
         }
+
+        thread::sleep(Duration::from_millis(sleep_ms));
 
         if sleep_ms < 5000 {
             sleep_ms *= 2;

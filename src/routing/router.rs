@@ -20,6 +20,6 @@
 use backend::{message_queue::QueuedMessage, processor::RequestProcessor};
 use routing::errors::RouterError;
 
-pub trait Router<T: RequestProcessor> {
-    fn route(&self, Vec<QueuedMessage<T::Message>>) -> Result<(), RouterError>;
+pub trait Router<P: RequestProcessor> {
+    fn route(&self, Vec<QueuedMessage<P::Message>>) -> Result<(), RouterError>;
 }

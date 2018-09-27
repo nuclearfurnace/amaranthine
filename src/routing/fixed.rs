@@ -26,32 +26,33 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::net::TcpStream;
 
 #[derive(Clone)]
-pub struct FixedRouter<T>
+pub struct FixedRouter<P>
 where
-    T: RequestProcessor + Clone + Send + 'static,
-    T::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    P: RequestProcessor + Clone + Send + 'static,
+    P::Message: Send,
+    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
-    processor: T,
-    pool: Arc<BackendPool<T>>,
+    processor: P,
+    pool: Arc<BackendPool<P>>,
 }
 
-impl<T> FixedRouter<T>
+impl<P> FixedRouter<P>
 where
-    T: RequestProcessor + Clone + Send + 'static,
-    T::Message: Message + Send,
-    T::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    P: RequestProcessor + Clone + Send + 'static,
+    P::Message: Message + Send,
+    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
-    pub fn new(processor: T, pool: Arc<BackendPool<T>>) -> FixedRouter<T> { FixedRouter { processor, pool } }
+    pub fn new(processor: P, pool: Arc<BackendPool<P>>) -> FixedRouter<P> { FixedRouter { processor, pool } }
 }
 
-impl<T> Router<T> for FixedRouter<T>
+impl<P> Router<P> for FixedRouter<P>
 where
-    T: RequestProcessor + Clone + Send + 'static,
-    T::Message: Message + Send,
-    T::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    P: RequestProcessor + Clone + Send + 'static,
+    P::Message: Message + Send,
+    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
-    fn route(&self, req: Vec<QueuedMessage<T::Message>>) -> Result<(), RouterError> {
-        let mut batches: HashMap<usize, Vec<QueuedMessage<T::Message>>> = HashMap::default();
+    fn route(&self, req: Vec<QueuedMessage<P::Message>>) -> Result<(), RouterError> {
+        let mut batches: HashMap<usize, Vec<QueuedMessage<P::Message>>> = HashMap::default();
 
         // Split all the messages out into backend/associated-keys groupings.
         for msg in req {

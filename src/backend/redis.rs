@@ -60,6 +60,8 @@ impl RequestProcessor for RedisRequestProcessor {
 
     fn get_error_message(&self, e: Box<Error>) -> Self::Message { RedisMessage::from_error(e) }
 
+    fn get_error_message_str(&self, e: &str) -> Self::Message { RedisMessage::from_error_str(e) }
+
     fn get_read_stream(&self, client_rx: ReadHalf<TcpStream>) -> Self::ClientReader {
         protocol::redis::read_messages_stream(client_rx)
     }
@@ -78,103 +80,101 @@ fn redis_fragment_messages(msgs: Vec<RedisMessage>) -> Result<Vec<(MessageState,
     let mut fragments = Vec::new();
 
     for msg in msgs {
-        match redis_is_multi_message(&msg) {
+        if !redis_is_multi_message(&msg) {
             // This message isn't fragmentable, so it passes through untouched.
-            false => {
-                let state = if msg.is_inline() {
-                    MessageState::Inline
-                } else {
-                    MessageState::Standalone
-                };
-                fragments.push((state, msg));
-            },
-            true => {
-                match msg {
-                    RedisMessage::Bulk(_, mut args) => {
-                        // Split off the actual command string and figure out what the new command string
-                        // will be for our fragments.
-                        let cmd = args.remove(0);
-                        let cmd_buf = redis_get_data_buffer(&cmd);
-                        let new_cmd_buf = match cmd_buf {
-                            Some(buf) => {
-                                match buf {
-                                    b"mget" => b"get",
-                                    b"del" => b"del",
-                                    b"mset" => b"set",
-                                    x => {
-                                        return Err(ProcessorError::FragmentError(format!(
-                                            "tried to fragment command '{:?}' but command is not fragmentable!",
-                                            x
-                                        )))
-                                    },
-                                }
-                            },
-                            None => {
-                                return Err(ProcessorError::FragmentError(
-                                    "tried to fragment bulk message with non-data argument in position 0!".to_owned(),
-                                ))
-                            },
-                        };
+            let state = if msg.is_inline() {
+                MessageState::Inline
+            } else {
+                MessageState::Standalone
+            };
+            fragments.push((state, msg));
+        } else {
+            match msg {
+                RedisMessage::Bulk(_, mut args) => {
+                    // Split off the actual command string and figure out what the new command string
+                    // will be for our fragments.
+                    let cmd = args.remove(0);
+                    let cmd_buf = redis_get_data_buffer(&cmd);
+                    let new_cmd_buf = match cmd_buf {
+                        Some(buf) => {
+                            match buf {
+                                b"mget" => b"get",
+                                b"del" => b"del",
+                                b"mset" => b"set",
+                                x => {
+                                    return Err(ProcessorError::FragmentError(format!(
+                                        "tried to fragment command '{:?}' but command is not fragmentable!",
+                                        x
+                                    )))
+                                },
+                            }
+                        },
+                        None => {
+                            return Err(ProcessorError::FragmentError(
+                                "tried to fragment bulk message with non-data argument in position 0!".to_owned(),
+                            ))
+                        },
+                    };
 
-                        // Now we'll do the actual splitting.  We take the new command string (get for
-                        // mget, set for mset, and del for del) and build a buffer for it.  We extract
-                        // N arguments at a time from our original message, where N is either 1 or 2
-                        // depending on if this is a set operation.  With each N arguments, we build a
-                        // new message using the new command string and the arguments we extract.
-                        let cmd_arg = redis_new_data_buffer(&new_cmd_buf[..]);
-                        let mut cmd_type = BytesMut::with_capacity(new_cmd_buf.len());
-                        cmd_type.extend_from_slice(&new_cmd_buf[..]);
+                    // Now we'll do the actual splitting.  We take the new command string (get for
+                    // mget, set for mset, and del for del) and build a buffer for it.  We extract
+                    // N arguments at a time from our original message, where N is either 1 or 2
+                    // depending on if this is a set operation.  With each N arguments, we build a
+                    // new message using the new command string and the arguments we extract.
+                    let cmd_arg = redis_new_data_buffer(&new_cmd_buf[..]);
+                    let mut cmd_type = BytesMut::with_capacity(new_cmd_buf.len());
+                    cmd_type.extend_from_slice(&new_cmd_buf[..]);
 
-                        let arg_take_cnt = if new_cmd_buf == b"set" { 2 } else { 1 };
-                        let total_fragments = args.len();
+                    let arg_take_cnt = if new_cmd_buf == b"set" { 2 } else { 1 };
+                    let total_fragments = args.len();
 
-                        // Make sure we won't be left with extra arguments.
-                        if total_fragments % arg_take_cnt != 0 {
-                            return Err(ProcessorError::FragmentError(format!(
-                                "incorrect multiple of argument count! (multiple: {}, arg count: {}, cmd type: {:?})",
-                                arg_take_cnt,
-                                args.len(),
-                                &cmd_type
-                            )));
-                        }
+                    // Make sure we won't be left with extra arguments.
+                    if total_fragments % arg_take_cnt != 0 {
+                        return Err(ProcessorError::FragmentError(format!(
+                            "incorrect multiple of argument count! (multiple: {}, arg count: {}, cmd type: {:?})",
+                            arg_take_cnt,
+                            args.len(),
+                            &cmd_type
+                        )));
+                    }
 
-                        // For get requests, we can stream back the fragments so long as they're in
-                        // order.  We also need to make sure we provide the proper header (aka the data
-                        // that tells the client the response is going to be multiple items) to the
-                        // first fragment so that we generate valid output.
-                        let is_streaming = new_cmd_buf == b"get";
-                        let mut streaming_hdr = if is_streaming {
-                            Some(redis_new_bulk_buffer(total_fragments))
+                    // For get requests, we can stream back the fragments so long as they're in
+                    // order.  We also need to make sure we provide the proper header (aka the data
+                    // that tells the client the response is going to be multiple items) to the
+                    // first fragment so that we generate valid output.
+                    let is_streaming = new_cmd_buf == b"get";
+                    let mut streaming_hdr = if is_streaming {
+                        Some(redis_new_bulk_buffer(total_fragments))
+                    } else {
+                        None
+                    };
+
+                    let mut fragment_count = 0;
+                    while !args.is_empty() {
+                        // This is contorted but we split off the first N arguments, which leaves `args`
+                        // with those N and `new_args` with the rest.  We feed those to a function which
+                        // builds us our new message, and then finally we replace `args` with `new_args`
+                        // so that we can continue on.
+                        let new_args = args.split_off(arg_take_cnt);
+                        args.insert(0, cmd_arg.clone());
+                        let new_bulk = redis_new_bulk_from_args(args);
+
+                        let state = if is_streaming {
+                            MessageState::StreamingFragmented(streaming_hdr.take())
                         } else {
-                            None
+                            // Normal fragments need to know the command they're being used for so
+                            // we can properly form a command-specific response when we ultimate
+                            // defragment these messages later on.
+                            MessageState::Fragmented(cmd_type.clone(), fragment_count, total_fragments)
                         };
 
-                        let mut fragment_count = 0;
-                        while !args.is_empty() {
-                            // This is contorted but we split off the first N arguments, which leaves `args`
-                            // with those N and `new_args` with the rest.  We feed those to a function which
-                            // builds us our new message, and then finally we replace `args` with `new_args`
-                            // so that we can continue on.
-                            let new_args = args.split_off(arg_take_cnt);
-                            args.insert(0, cmd_arg.clone());
-                            let new_bulk = redis_new_bulk_from_args(args);
-
-                            let state = match is_streaming {
-                                true => MessageState::StreamingFragmented(streaming_hdr.take()),
-                                // Normal fragments need to know the command they're being used for so
-                                // we can properly form a command-specific response when we ultimate
-                                // defragment these messages later on.
-                                false => MessageState::Fragmented(cmd_type.clone(), fragment_count, total_fragments),
-                            };
-
-                            fragments.push((state, new_bulk));
-                            fragment_count += 1;
-                            args = new_args;
-                        }
-                    },
-                    _ => unreachable!(),
-                }
-            },
+                        fragments.push((state, new_bulk));
+                        fragment_count += 1;
+                        args = new_args;
+                    }
+                },
+                _ => unreachable!(),
+            }
         }
     }
 

@@ -17,29 +17,23 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use crypto::{digest::Digest, md5::Md5};
+use std::fmt;
 
-use super::KeyHasher;
+#[derive(Debug)]
+pub enum CreationError {
+    /// An invalid parameter was supplied, usually sourced from configuration.
+    InvalidParameter(String),
 
-pub struct MD5Hasher;
-
-impl MD5Hasher {
-    pub fn new() -> MD5Hasher { MD5Hasher {} }
+    /// An invalid resource was requested, usually a configuration value pointing to a non-existent
+    /// type or function.
+    InvalidResource(String),
 }
 
-impl KeyHasher for MD5Hasher {
-    fn hash(&self, buf: &[u8]) -> u64 {
-        let mut hasher = Md5::new();
-        hasher.input(buf);
-
-        let mut result = [0; 16];
-        hasher.result(&mut result);
-
-        u64::from(
-            (u32::from(result[3]) << 24)
-                + (u32::from(result[2]) << 16)
-                + (u32::from(result[1]) << 8)
-                + u32::from(result[0]),
-        )
+impl fmt::Display for CreationError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        match self {
+            CreationError::InvalidParameter(param) => write!(f, "invalid parameter: {}", param.as_str()),
+            CreationError::InvalidResource(s) => write!(f, "invalid resource: {}", s.as_str()),
+        }
     }
 }

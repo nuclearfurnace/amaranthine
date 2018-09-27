@@ -40,6 +40,7 @@ const REDIS_STATUS_BUF: [u8; 1] = [REDIS_COMMAND_STATUS];
 const REDIS_ERR_BUF: [u8; 5] = [b'-', b'E', b'R', b'R', b' '];
 const REDIS_INT_BUF: [u8; 1] = [REDIS_COMMAND_INTEGER];
 const REDIS_CRLF: [u8; 2] = [b'\r', b'\n'];
+const REDIS_BACKEND_CLOSED: &str = "backend closed prematurely";
 
 /// An unbounded stream of Redis messages pulled from an asynchronous reader.
 pub struct RedisMessageStream<R>
@@ -103,9 +104,10 @@ impl RedisMessage {
     }
 
     pub fn from_status(status_str: &str) -> RedisMessage {
-        let mut rd = BytesMut::with_capacity(status_str.len() + 3);
+        let bytes = status_str.as_bytes();
+        let mut rd = BytesMut::with_capacity(REDIS_STATUS_BUF.len() + bytes.len() + 2);
         rd.put_slice(&REDIS_STATUS_BUF[..]);
-        rd.put_slice(&status_str.as_bytes());
+        rd.put_slice(&bytes);
         rd.put_slice(&REDIS_CRLF[..]);
 
         RedisMessage::Status(rd, 1)
@@ -113,12 +115,22 @@ impl RedisMessage {
 
     pub fn from_error(e: Box<Error>) -> RedisMessage {
         let error_str = e.description();
+        let bytes = error_str.as_bytes();
 
-        // Full length is sigil (1) + header (ERR, 3) + space (1) + the message itself (N) + teh
-        // trailing CRLF (2).
-        let mut rd = BytesMut::with_capacity(error_str.len() + 7);
+        let mut rd = BytesMut::with_capacity(REDIS_ERR_BUF.len() + bytes.len() + 2);
         rd.put_slice(&REDIS_ERR_BUF[..]);
-        rd.put_slice(&error_str.as_bytes());
+        rd.put_slice(&bytes);
+        rd.put_slice(&REDIS_CRLF[..]);
+
+        RedisMessage::Error(rd, 5)
+    }
+
+    pub fn from_error_str(error_str: &str) -> RedisMessage {
+        let bytes = error_str.as_bytes();
+
+        let mut rd = BytesMut::with_capacity(REDIS_ERR_BUF.len() + bytes.len() + 2);
+        rd.put_slice(&REDIS_ERR_BUF[..]);
+        rd.put_slice(&bytes);
         rd.put_slice(&REDIS_CRLF[..]);
 
         RedisMessage::Error(rd, 5)
@@ -318,13 +330,19 @@ where
                     self.metrics
                         .update_count(Metrics::ServerBytesReceived, bytes_read as i64);
 
-                    let qmsg = self.msgs.remove(0);
+                    let mut qmsg = self.msgs.remove(0);
                     qmsg.respond(msg);
                 },
                 Err(e) => return Err(e),
                 _ => {
                     return if socket_closed {
-                        // If the socket is closed, let's also close up shop.
+                        // If the socket is closed, let's also close up shop after responding to
+                        // the client with errors.
+                        let err = RedisMessage::from_error_str(REDIS_BACKEND_CLOSED);
+                        while let Some(mut qmsg) = self.msgs.pop() {
+                            qmsg.respond(err.clone())
+                        }
+
                         Err(ProtocolError::BackendClosedPrematurely)
                     } else {
                         Ok(Async::NotReady)

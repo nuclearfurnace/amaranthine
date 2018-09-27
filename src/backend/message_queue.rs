@@ -33,6 +33,7 @@ use slab::Slab;
 use std::collections::VecDeque;
 use tokio::io::{write_all, AsyncWrite};
 
+/// Message state of queued messages.
 #[derive(Debug, PartialEq)]
 pub enum MessageState {
     /// An unfragmented, standalone message.
@@ -70,6 +71,17 @@ pub enum MessageState {
     StreamingFragmented(Option<BytesMut>),
 }
 
+/// Message response types for a queued message.
+#[derive(Debug)]
+pub enum MessageResponse<M> {
+    /// The message ultimately "failed".  This happens if a queued message is dropped before having
+    /// a response sent for it, which may happen if an error occurs during the backend read, etc.
+    Failed,
+
+    /// The message was processored correctly and a response was submitted to the message queue.
+    Complete(M),
+}
+
 /// A proxy to a queued message slot.
 ///
 /// This holds the actual request which is tied to the response slot, as well as the slot and the
@@ -79,7 +91,8 @@ pub enum MessageState {
 pub struct QueuedMessage<M> {
     msg: Option<M>,
     slot: usize,
-    response_tx: UnboundedSender<(usize, M)>,
+    completed: bool,
+    response_tx: UnboundedSender<(usize, MessageResponse<M>)>,
 }
 
 impl<M> Message for QueuedMessage<M>
@@ -94,10 +107,11 @@ where
 }
 
 impl<M> QueuedMessage<M> {
-    pub fn new(msg: M, slot: usize, response_tx: UnboundedSender<(usize, M)>) -> QueuedMessage<M> {
+    pub fn new(msg: M, slot: usize, response_tx: UnboundedSender<(usize, MessageResponse<M>)>) -> QueuedMessage<M> {
         QueuedMessage {
             msg: Some(msg),
             slot,
+            completed: false,
             response_tx,
         }
     }
@@ -106,9 +120,27 @@ impl<M> QueuedMessage<M> {
     pub fn consume_inner(&mut self) -> Option<M> { self.msg.take() }
 
     /// Sends back a message to the queue to the assigned slot.
-    pub fn respond(&self, response: M) { let _ = self.response_tx.unbounded_send((self.slot, response)); }
+    pub fn respond(&mut self, response: M) {
+        let _ = self
+            .response_tx
+            .unbounded_send((self.slot, MessageResponse::Complete(response)));
+        self.completed = true;
+    }
 }
 
+impl<M> Drop for QueuedMessage<M> {
+    fn drop(&mut self) {
+        // Since we always want to respond to a client otherwise they would just hang, we need to
+        // make sure if a queued message is dropped before having a response sent, we send a
+        // default error message back to the client.  The message queue will ask the processor for
+        // a protocol-specific error payload to send back when it reads a "failed" slot.
+        if !self.completed {
+            let _ = self.response_tx.unbounded_send((self.slot, MessageResponse::Failed));
+        }
+    }
+}
+
+/// Control messages that can be sent to the message queue.
 enum QueueControlMessage<M> {
     /// Enqueues a set of messages in the message queue, returning the allocated slots for all
     /// expanded messages in the original list.
@@ -142,8 +174,8 @@ where
     slots: Slab<Option<P::Message>>,
 
     // Channel for backends to notify us when a response has been generated.
-    responses_rx: UnboundedReceiver<(usize, P::Message)>,
-    responses_tx: Option<UnboundedSender<(usize, P::Message)>>,
+    responses_rx: UnboundedReceiver<(usize, MessageResponse<P::Message>)>,
+    responses_tx: Option<UnboundedSender<(usize, MessageResponse<P::Message>)>>,
 
     buf_tx: UnboundedSender<Vec<BytesMut>>,
 }
@@ -171,7 +203,7 @@ where
 
                 write_all(tx, obuf).map_err(|_| ()).map(|(tx, _)| tx)
             }).and_then(|_| {
-                debug!("[message queue buf tx] closing!");
+                trace!("[message queue send buffer] dropping");
                 ok(())
             }).map_err(|_| {
                 get_sink().increment(Metrics::ClientTxErrors);
@@ -309,17 +341,13 @@ where
     type Item = ();
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        debug!("[message queue] poll enter");
-
         if self.input_closed && self.output_closed {
-            debug!("[message queue] input/output closed, shutting down");
+            trace!("[message queue] input/output closed, shutting down");
             return Ok(Async::Ready(()));
         }
 
         // First, go through and process any control messages.
         loop {
-            debug!("[message queue] enter control process loop");
-
             // Only service the control loop if we're not closed.   Otherwise, we're just draining
             // responses as they come in for the client.
             if self.input_closed {
@@ -332,7 +360,7 @@ where
                         QueueControlMessage::Enqueue(msgs, tx) => {
                             match self.processor.fragment_messages(msgs) {
                                 Ok(fmsgs) => {
-                                    debug!("[message queue] enqueueing {} message fragments", fmsgs.len());
+                                    trace!("[message queue] enqueueing {} message fragments", fmsgs.len());
 
                                     let mut qmsgs = Vec::new();
                                     for (msg_state, msg) in fmsgs {
@@ -352,7 +380,9 @@ where
 
                                     match tx.send(qmsgs) {
                                         Ok(()) => {},
-                                        Err(_) => panic!("unable to send to enqueue return tx"),
+                                        // If the receiver has dropped, the client is gone and/or
+                                        // we're probably shutting down, so let's also close.
+                                        Err(_) => return Ok(Async::Ready(())),
                                     }
                                 },
                                 // TODO: how do we propagate this back to the main client loop?
@@ -363,7 +393,7 @@ where
                 },
                 Ok(Async::NotReady) => break,
                 Ok(Async::Ready(None)) => {
-                    debug!("[message queue] control plane dropped, closing input");
+                    trace!("[message queue] control plane dropped, closing input");
                     self.input_closed = true;
 
                     // We have to drop our copy of the sending side of the responses channel
@@ -380,12 +410,18 @@ where
 
         // Pull in any responses we've gotten.
         loop {
-            debug!("[message queue] enter response process loop");
-
             match self.responses_rx.poll() {
-                Ok(Async::Ready(Some((id, msg)))) => {
+                Ok(Async::Ready(Some((id, rmsg)))) => {
                     let slot = self.slots.get_mut(id).unwrap();
-                    slot.replace(msg);
+                    match rmsg {
+                        MessageResponse::Complete(msg) => {
+                            slot.replace(msg);
+                        },
+                        MessageResponse::Failed => {
+                            let err = self.processor.get_error_message_str("failed to receive response");
+                            slot.replace(err);
+                        },
+                    }
                 },
                 Ok(Async::NotReady) | Ok(Async::Ready(None)) => break,
                 // Unbounded receivers never actually throw an error.
@@ -397,8 +433,6 @@ where
         let mut bufs = Vec::new();
 
         loop {
-            debug!("[message queue] enter buf send loop");
-
             match self.get_next_response() {
                 Ok(Async::Ready(Some(buf))) => bufs.push(buf),
                 Ok(Async::NotReady) => break,
@@ -408,7 +442,7 @@ where
                         // Notify ourselves so that we get polled one more time, which should
                         // trigger the full shutdown when it checks if input/output is closed.
                         self.output_closed = true;
-                        debug!("[message queue] no more slots present, closing output");
+                        trace!("[message queue] no more slots present, closing output");
                     }
 
                     break;
@@ -418,13 +452,17 @@ where
             }
         }
 
-        if !bufs.is_empty() {
-            self.buf_tx.unbounded_send(bufs).expect("buf tx send should not fail");
+        // If we get an error during the send, it means the receiver has dropped, and the
+        // receiver would only drop if there was an error during a send to the client.  Likely,
+        // the client has dropped and so we can't write to them anymore, which means we have no
+        // more reason to be running the queue.  Time to abandon ship!
+        if !bufs.is_empty() && self.buf_tx.unbounded_send(bufs).is_err() {
+            return Ok(Async::Ready(()));
         }
 
         // Fast path to close the message queue if we're shutting down.
         if self.input_closed && self.output_closed {
-            debug!("[message queue] input/output closed, shutting down (fast path)");
+            trace!("[message queue] input/output closed, shutting down (fast path)");
             return Ok(Async::Ready(()));
         }
 
@@ -437,7 +475,7 @@ where
     P: RequestProcessor + Send,
 {
     fn drop(&mut self) {
-        debug!("[message queue] dropping!");
+        trace!("[message queue] dropping");
     }
 }
 
@@ -456,7 +494,7 @@ where
     P: RequestProcessor + Send + 'static,
 {
     /// Queues a set of messages in this message queue, allocating a slot for a response for each
-    /// message.  Queued messages have a reference back to this messge queue in order to notify it.
+    /// message.  Queued messages have a reference back to this message queue in order to notify it.
     pub fn enqueue(&mut self, msgs: Vec<P::Message>) -> impl Future<Item = Vec<QueuedMessage<P::Message>>, Error = ()> {
         let (tx, rx) = oneshot::channel();
 
@@ -469,9 +507,9 @@ where
 
 impl<P> Drop for MessageQueueControlPlane<P>
 where
-    P: RequestProcessor + Send,
+    P: RequestProcessor + Send + 'static,
 {
     fn drop(&mut self) {
-        debug!("[message queue control plane] dropping!");
+        trace!("[message queue control plane] dropping");
     }
 }

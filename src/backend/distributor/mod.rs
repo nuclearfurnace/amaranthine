@@ -20,13 +20,10 @@
 mod modulo;
 mod random;
 pub use self::{modulo::ModuloDistributor, random::RandomDistributor};
+use errors::CreationError;
 
 /// A placeholder for backends.  This lets us avoid holding references to the actual backends.
-pub struct BackendDescriptor;
-
-impl BackendDescriptor {
-    pub fn new() -> BackendDescriptor { BackendDescriptor {} }
-}
+pub struct BackendDescriptor {}
 
 /// Distributes items amongst a set of backends.
 ///
@@ -42,10 +39,15 @@ pub trait Distributor {
     fn choose(&self, point: u64) -> usize;
 }
 
-pub fn configure_distributor(dist_type: &str) -> Box<Distributor + Send + Sync> {
+pub fn configure_distributor(dist_type: &str) -> Result<Box<Distributor + Send + Sync>, CreationError> {
     match dist_type {
-        "random" => Box::new(RandomDistributor::new()),
-        "modulo" => Box::new(ModuloDistributor::new()),
-        s => panic!("unknown distributor type {}", s),
+        "random" => Ok(Box::new(RandomDistributor::new())),
+        "modulo" => Ok(Box::new(ModuloDistributor::new())),
+        s => {
+            Err(CreationError::InvalidResource(format!(
+                "unknown distributor type {}",
+                s
+            )))
+        },
     }
 }

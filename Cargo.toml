@@ -41,6 +41,7 @@ hotmic = "^0.2"
 slab = "^0.4"
 crossbeam = "^0.4"
 crossbeam-arccell = "^0.6"
+parking_lot = "^0.6"
 
 [dependencies.slog]
 version = "^2.3"
