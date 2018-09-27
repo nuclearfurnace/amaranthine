@@ -1,4 +1,5 @@
 language: rust
+services: docker
 
 env:
   global:
