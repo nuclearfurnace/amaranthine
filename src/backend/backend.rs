@@ -25,12 +25,36 @@ use futures::{
     future::{ok, Either, Shared},
     prelude::*,
     sync::mpsc,
+    Poll,
 };
 use futures_turnstyle::Waiter;
 use protocol::errors::ProtocolError;
-use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
-use tokio::net::TcpStream;
+use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use tokio::{
+    net::tcp::TcpStream,
+    timer::{timeout::Error as TimeoutError, Timeout},
+};
 use util::{WorkQueue, Worker};
+
+type BackendWorkQueue<T> = Worker<Vec<QueuedMessage<T>>>;
+type MaybeTimeout<F> = Either<NotTimeout<F>, Timeout<F>>;
+
+pub struct NotTimeout<F>
+where
+    F: Future,
+{
+    inner: F,
+}
+
+impl<F> Future for NotTimeout<F>
+where
+    F: Future,
+{
+    type Error = TimeoutError<F::Error>;
+    type Item = F::Item;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> { self.inner.poll().map_err(TimeoutError::inner) }
+}
 
 /// Commands sent by backend connections to their backend supervisor.
 pub enum BackendCommand {
@@ -55,12 +79,13 @@ where
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
     processor: P,
-    worker: Worker<Vec<QueuedMessage<P::Message>>>,
+    worker: BackendWorkQueue<P::Message>,
     command_tx: mpsc::UnboundedSender<BackendCommand>,
     address: SocketAddr,
+    timeout_ms: u64,
 
     socket: Option<TcpStream>,
-    current: Option<P::Future>,
+    current: Option<MaybeTimeout<P::Future>>,
 }
 
 impl<P> Future for BackendConnection<P>
@@ -86,7 +111,8 @@ where
                     Ok(Async::NotReady) => return Ok(Async::NotReady),
                     Err(_) => {
                         // On error, we kill ourselves but notify the supervisor first so it can
-                        // replace us down the line.
+                        // replace us down the line.  This includes both errors with the underlying
+                        // call itself or timing out during the call.
                         let _ = self.command_tx.unbounded_send(BackendCommand::Error);
                         return Err(());
                     },
@@ -102,7 +128,12 @@ where
                         None => Either::B(TcpStream::connect(&self.address)),
                     };
 
-                    let work = self.processor.process(batch, socket);
+                    let inner = self.processor.process(batch, socket);
+                    let work = if self.timeout_ms == 0 {
+                        Either::A(NotTimeout { inner })
+                    } else {
+                        Either::B(Timeout::new(inner, Duration::from_millis(self.timeout_ms)))
+                    };
                     self.current = Some(work);
                 },
                 Ok(Async::Ready(None)) => return Ok(Async::Ready(())),
@@ -143,7 +174,7 @@ where
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
     processor: P,
-    worker: Worker<Vec<QueuedMessage<P::Message>>>,
+    worker: BackendWorkQueue<P::Message>,
     health: Arc<BackendHealth>,
     updates_tx: mpsc::UnboundedSender<()>,
     command_rx: mpsc::UnboundedReceiver<BackendCommand>,
@@ -152,6 +183,7 @@ where
     address: SocketAddr,
     conn_count: usize,
     conn_limit: usize,
+    timeout_ms: u64,
 
     close: Shared<Waiter>,
 }
@@ -198,6 +230,7 @@ where
                 worker: self.worker.clone(),
                 address: self.address,
                 command_tx: self.command_tx.clone(),
+                timeout_ms: self.timeout_ms,
                 current: None,
                 socket: None,
             };
@@ -223,17 +256,28 @@ where
 }
 
 fn new_supervisor<P>(
-    addr: SocketAddr, processor: P, worker: Worker<Vec<QueuedMessage<P::Message>>>, health: Arc<BackendHealth>,
-    conn_limit: usize, updates_tx: mpsc::UnboundedSender<()>, close: Shared<Waiter>,
-) -> BackendSupervisor<P>
+    processor: P, addr: SocketAddr, mut options: HashMap<String, String>, worker: BackendWorkQueue<P::Message>,
+    health: Arc<BackendHealth>, updates_tx: mpsc::UnboundedSender<()>, close: Shared<Waiter>,
+) -> Result<BackendSupervisor<P>, CreationError>
 where
     P: RequestProcessor + Clone + Send,
     P::Message: Send,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
+    let conn_limit_raw = options.entry("conns".to_owned()).or_insert_with(|| "1".to_owned());
+    let conn_limit = usize::from_str(conn_limit_raw.as_str())
+        .map_err(|_| CreationError::InvalidParameter("options.conns".to_string()))?;
+    debug!("[listener] using connection limit of '{}'", conn_limit);
+
+    let timeout_ms_raw = options
+        .entry("timeout_ms".to_owned())
+        .or_insert_with(|| "1000".to_owned());
+    let timeout_ms = u64::from_str(timeout_ms_raw.as_str())
+        .map_err(|_| CreationError::InvalidParameter("options.timeout_ms".to_string()))?;
+
     let (command_tx, command_rx) = mpsc::unbounded();
 
-    BackendSupervisor {
+    Ok(BackendSupervisor {
         processor,
         worker,
         health,
@@ -245,9 +289,10 @@ where
         address: addr,
         conn_count: 0,
         conn_limit,
+        timeout_ms,
 
         close,
-    }
+    })
 }
 
 /// Managed connections to a backend server.
@@ -317,7 +362,7 @@ where
             work_queue,
             health: health.clone(),
         };
-        let runner = new_supervisor(addr, processor, worker, health, conn_limit, updates_tx, close);
+        let runner = new_supervisor(processor, addr, options, worker, health, updates_tx, close)?;
 
         Ok((backend, runner))
     }

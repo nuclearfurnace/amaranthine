@@ -78,6 +78,28 @@ mod redis_tests {
     }
 
     #[test]
+    fn test_large_insert_times_out() {
+        let (sd, _rd1, _rd2) = get_redis_daemons();
+
+        let client = RedisClient::open(sd.get_conn_str()).unwrap();
+        let conn = client.get_connection().unwrap();
+
+        let mut hash_fields = Vec::new();
+        for i in 0..500000 {
+            let key = format!("k-{}", i);
+            let value = format!("v-{}", i);
+
+            hash_fields.push((key, value));
+        }
+
+        let result: RedisResult<()> = conn.hset_multiple("large-hash", &hash_fields);
+        match result {
+            Ok(_) => panic!("should have been error after request timing out"),
+            Err(inner_err) => assert_eq!(inner_err.kind(), RedisErrorKind::ResponseError),
+        }
+    }
+
+    #[test]
     fn test_quit_drops_conn() {
         let (sd, _rd1, _rd2) = get_redis_daemons();
 

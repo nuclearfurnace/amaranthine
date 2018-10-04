@@ -22,7 +22,8 @@ macro_rules! get_redis_config {
                         "default": {{
                             "addresses": ["127.0.0.1:{}", "127.0.0.1:{}"],
                             "options": {{
-                                "cooloff_timeout_ms": "2000"
+                                "cooloff_timeout_ms": "2000",
+                                "timeout_ms": "100"
                             }}
                         }}
                     }},
