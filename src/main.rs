@@ -21,7 +21,6 @@
 #![feature(nll)]
 #![feature(associated_type_defaults)]
 #![feature(duration_as_u128)]
-#![feature(extern_prelude)]
 #![feature(option_replace)]
 #![recursion_limit = "1024"]
 
