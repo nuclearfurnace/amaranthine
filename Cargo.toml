@@ -44,7 +44,7 @@ crossbeam-arccell = "^0.6"
 parking_lot = "^0.6"
 
 [dependencies.slog]
-version = "^2.3"
+version = "^2.4"
 features = ["max_level_trace", "release_max_level_info"]
 
 [dependencies.config]
