@@ -17,9 +17,13 @@ matrix:
     - env: TARGET=x86_64-unknown-linux-gnu
 
     # OSX
-    - env: TARGET=i686-apple-darwin
+    - env:
+        - TARGET=i686-apple-darwin
+        - REDIS_BIN=/usr/local/bin/redis-server
       os: osx
-    - env: TARGET=x86_64-apple-darwin
+    - env:
+        - TARGET=x86_64-apple-darwin
+        - REDIS_BIN=/usr/local/bin/redis-server
       os: osx
 
 before_install:
@@ -27,6 +31,7 @@ before_install:
   - rustup self update
   - rustup install nightly
   - rustup default nightly
+  - if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then brew install redis; fi
 
 install:
   - sh ci/install.sh
