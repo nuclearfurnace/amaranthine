@@ -27,6 +27,9 @@ pub enum CreationError {
     /// An invalid resource was requested, usually a configuration value pointing to a non-existent
     /// type or function.
     InvalidResource(String),
+
+    /// When a listener fails to get created during the launch/reload phase.
+    ListenerSpawnFailed,
 }
 
 impl fmt::Display for CreationError {
@@ -34,6 +37,7 @@ impl fmt::Display for CreationError {
         match self {
             CreationError::InvalidParameter(param) => write!(f, "invalid parameter: {}", param.as_str()),
             CreationError::InvalidResource(s) => write!(f, "invalid resource: {}", s.as_str()),
+            CreationError::ListenerSpawnFailed => write!(f, "listener spawn failed"),
         }
     }
 }

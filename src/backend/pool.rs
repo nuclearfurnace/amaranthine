@@ -20,8 +20,7 @@
 use super::{distributor, hasher};
 use backend::{backend::Backend, processor::RequestProcessor};
 use errors::CreationError;
-use futures::{future::Shared, prelude::*, sync::mpsc};
-use futures_turnstyle::Waiter;
+use futures::{prelude::*, sync::mpsc};
 use parking_lot::RwLock;
 use protocol::errors::ProtocolError;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
@@ -38,15 +37,16 @@ where
     backends: Vec<Backend<P>>,
 }
 
-pub struct BackendPoolSupervisor<P>
+pub struct BackendPoolSupervisor<P, C>
 where
     P: RequestProcessor + Clone + Send + 'static,
     P::Message: Send,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    C: Future + Send + 'static,
 {
     pool: Arc<BackendPool<P>>,
     updates_rx: mpsc::UnboundedReceiver<()>,
-    close: Shared<Waiter>,
+    close: C,
 }
 
 impl<P> BackendPool<P>
@@ -55,9 +55,15 @@ where
     P::Message: Send,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
-    pub fn new(
-        addresses: &[SocketAddr], processor: P, mut options: HashMap<String, String>, close: Shared<Waiter>,
-    ) -> Result<Arc<BackendPool<P>>, CreationError> {
+    pub fn new<C>(
+        addresses: &[SocketAddr], processor: P, mut options: HashMap<String, String>, close: C,
+    ) -> Result<Arc<BackendPool<P>>, CreationError>
+    where
+        P: RequestProcessor + Clone + Send + 'static,
+        P::Message: Send,
+        P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+        C: Future + Clone + Send + 'static,
+    {
         let dist_type = options
             .entry("distribution".to_owned())
             .or_insert_with(|| "modulo".to_owned())
@@ -159,11 +165,12 @@ where
     }
 }
 
-impl<P> Future for BackendPoolSupervisor<P>
+impl<P, C> Future for BackendPoolSupervisor<P, C>
 where
     P: RequestProcessor + Clone + Send + 'static,
     P::Message: Send,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    C: Future + Send,
 {
     type Error = ();
     type Item = ();
@@ -194,11 +201,12 @@ where
     }
 }
 
-impl<P> Drop for BackendPoolSupervisor<P>
+impl<P, C> Drop for BackendPoolSupervisor<P, C>
 where
     P: RequestProcessor + Clone + Send + 'static,
     P::Message: Send,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    C: Future + Send,
 {
     fn drop(&mut self) {
         trace!("[backend pool supervisor] dropping");

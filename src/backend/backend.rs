@@ -22,12 +22,11 @@ use backend::{
 };
 use errors::CreationError;
 use futures::{
-    future::{ok, Either, Shared},
+    future::{ok, Either},
     prelude::*,
     sync::mpsc,
     Poll,
 };
-use futures_turnstyle::Waiter;
 use protocol::errors::ProtocolError;
 use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 use tokio::{
@@ -73,13 +72,15 @@ pub enum BackendCommand {
 ///
 /// If a backend connection encounters an error, it will terminate and notify its backend
 /// supervisor, so that it can be replaced.
-struct BackendConnection<P>
+struct BackendConnection<P, C>
 where
     P: RequestProcessor,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    C: Future + Send,
 {
     processor: P,
     worker: BackendWorkQueue<P::Message>,
+    close: C,
     command_tx: mpsc::UnboundedSender<BackendCommand>,
     address: SocketAddr,
     timeout_ms: u64,
@@ -88,16 +89,22 @@ where
     current: Option<MaybeTimeout<P::Future>>,
 }
 
-impl<P> Future for BackendConnection<P>
+impl<P, C> Future for BackendConnection<P, C>
 where
     P: RequestProcessor,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    C: Future + Send,
 {
     type Error = ();
     type Item = ();
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         loop {
+            // If we're supposed to close, do it now.
+            if let Ok(Async::Ready(_)) = self.close.poll() {
+                return Ok(Async::Ready(()));
+            }
+
             // First, check if we have an operation running.  If we do, poll it to drive it towards
             // completion.  If it's done, we'll reclaim the socket and then fallthrough to trying to
             // find another piece of work to run.
@@ -147,10 +154,11 @@ where
     }
 }
 
-impl<P> Drop for BackendConnection<P>
+impl<P, C> Drop for BackendConnection<P, C>
 where
     P: RequestProcessor,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    C: Future + Send,
 {
     fn drop(&mut self) {
         trace!("[backend connection] dropping");
@@ -167,11 +175,12 @@ where
 /// There is an implicit requirement that a backend be created with a sibling state machine, and
 /// each given the appropriate tx/rx sides of a channel that allows them to communicate with each
 /// other.
-pub struct BackendSupervisor<P>
+pub struct BackendSupervisor<P, C>
 where
     P: RequestProcessor + Clone + Send + 'static,
     P::Message: Send,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    C: Future + Clone + Send + 'static,
 {
     processor: P,
     worker: BackendWorkQueue<P::Message>,
@@ -185,14 +194,15 @@ where
     conn_limit: usize,
     timeout_ms: u64,
 
-    close: Shared<Waiter>,
+    close: C,
 }
 
-impl<P> Future for BackendSupervisor<P>
+impl<P, C> Future for BackendSupervisor<P, C>
 where
     P: RequestProcessor + Clone + Send + 'static,
     P::Message: Send,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    C: Future + Clone + Send + 'static,
 {
     type Error = ();
     type Item = ();
@@ -228,6 +238,7 @@ where
             let connection = BackendConnection {
                 processor: self.processor.clone(),
                 worker: self.worker.clone(),
+                close: self.close.clone(),
                 address: self.address,
                 command_tx: self.command_tx.clone(),
                 timeout_ms: self.timeout_ms,
@@ -244,25 +255,27 @@ where
     }
 }
 
-impl<P> Drop for BackendSupervisor<P>
+impl<P, C> Drop for BackendSupervisor<P, C>
 where
     P: RequestProcessor + Clone + Send + 'static,
     P::Message: Send,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    C: Future + Clone + Send + 'static,
 {
     fn drop(&mut self) {
         trace!("[backend supervisor] dropping");
     }
 }
 
-fn new_supervisor<P>(
+fn new_supervisor<P, C>(
     processor: P, addr: SocketAddr, mut options: HashMap<String, String>, worker: BackendWorkQueue<P::Message>,
-    health: Arc<BackendHealth>, updates_tx: mpsc::UnboundedSender<()>, close: Shared<Waiter>,
-) -> Result<BackendSupervisor<P>, CreationError>
+    health: Arc<BackendHealth>, updates_tx: mpsc::UnboundedSender<()>, close: C,
+) -> Result<BackendSupervisor<P, C>, CreationError>
 where
     P: RequestProcessor + Clone + Send,
     P::Message: Send,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    C: Future + Clone + Send + 'static,
 {
     let conn_limit_raw = options.entry("conns".to_owned()).or_insert_with(|| "1".to_owned());
     let conn_limit = usize::from_str(conn_limit_raw.as_str())
@@ -322,10 +335,16 @@ where
     P::Message: Send,
     P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
-    pub fn new(
+    pub fn new<C>(
         addr: SocketAddr, processor: P, mut options: HashMap<String, String>, updates_tx: mpsc::UnboundedSender<()>,
-        close: Shared<Waiter>,
-    ) -> Result<(Backend<P>, BackendSupervisor<P>), CreationError> {
+        close: C,
+    ) -> Result<(Backend<P>, BackendSupervisor<P, C>), CreationError>
+    where
+        P: RequestProcessor + Clone + Send,
+        P::Message: Send,
+        P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+        C: Future + Clone + Send,
+    {
         let conn_limit_raw = options.entry("conns".to_owned()).or_insert_with(|| "1".to_owned());
         let conn_limit = usize::from_str(conn_limit_raw.as_str())
             .map_err(|_| CreationError::InvalidParameter("options.conns".to_string()))?;

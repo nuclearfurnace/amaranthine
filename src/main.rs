@@ -51,7 +51,10 @@ extern crate futures;
 extern crate futures_turnstyle;
 extern crate net2;
 
-use futures::future::{lazy, ok, Shared};
+use futures::{
+    future::{lazy, ok},
+    sync::{mpsc, oneshot},
+};
 use futures_turnstyle::{Turnstyle, Waiter};
 use signal_hook::iterator::Signals;
 use std::{
@@ -83,6 +86,8 @@ extern crate test;
 #[cfg(test)]
 extern crate spectral;
 
+extern crate tokio_evacuate;
+
 mod backend;
 mod common;
 mod conf;
@@ -94,21 +99,33 @@ mod routing;
 mod util;
 
 use conf::{Configuration, LevelExt};
+use errors::CreationError;
+use util::typeless;
+
+enum SupervisorCommand {
+    Launch,
+    Reload,
+    Shutdown,
+}
 
 fn run() -> i32 {
     // Set up our signal handling before anything else.
+    let (supervisor_tx, supervisor_rx) = mpsc::unbounded();
     let signals = Signals::new(&[libc::SIGINT, libc::SIGUSR1]).expect("failed to register signal handlers");
-    let turnstyle = Turnstyle::new();
-    let closer = turnstyle.join().shared();
     thread::spawn(move || {
+        // Do an initial send of the launch command to trigger actually spawning the listeners at
+        // startup.
+        let _ = supervisor_tx.unbounded_send(SupervisorCommand::Launch);
+
         for signal in signals.forever() {
             info!("[core] signal received: {:?}", signal);
 
             match signal {
-                libc::SIGUSR1 => {}, // signal to spawn new process
+                libc::SIGUSR1 => {
+                    let _ = supervisor_tx.unbounded_send(SupervisorCommand::Reload);
+                },
                 libc::SIGINT => {
-                    // signal to close this process
-                    turnstyle.turn();
+                    let _ = supervisor_tx.unbounded_send(SupervisorCommand::Shutdown);
                     break;
                 },
                 _ => {}, // we don't care about the rest
@@ -133,70 +150,101 @@ fn run() -> i32 {
     slog_stdlog::init().unwrap();
     info!("[core] logging configured");
 
-    // Now run.
-    // let mut threadpool_builder = thread_pool::Builder::new();
-    // threadpool_builder.name_prefix("synchrotron-worker-").pool_size(4);
-
-    // let mut runtime = runtime::Builder::new()
-    //    .threadpool_builder(threadpool_builder)
-    //    .build()
-    //    .expect("failed to create tokio runtime");
-    let mut runtime = runtime::current_thread::Runtime::new().unwrap();
+    let mut runtime = runtime::Builder::new().build().expect("failed to create tokio runtime");
 
     let initial = lazy(move || {
-        let listeners = configuration
-            .listeners
-            .into_iter()
-            .map(|x| {
-                let close = closer.clone();
-                let config = x.clone();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        launch_supervisor(supervisor_rx, shutdown_tx);
+        launch_stats(configuration.stats_port, shutdown_rx);
 
-                listener::from_config(config, close)
-            }).collect::<Vec<_>>();
-
-        let mut errors = Vec::new();
-        for listener in &listeners {
-            let result = listener.as_ref();
-            if result.is_err() {
-                let error = result.err().unwrap();
-                errors.push(error.to_string());
-            }
-        }
-
-        if !errors.is_empty() {
-            error!("[core] encountered errors while spawning listeners:");
-
-            for error in errors {
-                error!("[core] - {}", error);
-            }
-
-            return Err(());
-        }
-
-        // Launch all these listeners into the runtime.
-        for listener in listeners {
-            tokio::spawn(listener.unwrap());
-        }
-
-        // Launch our stats port.
-        launch_stats(configuration.stats_port, closer.clone());
-
-        Ok(())
+        ok(())
     });
 
     runtime.spawn(initial);
 
     info!("[core] synchrotron running");
 
-    // runtime.shutdown_on_idle().wait().unwrap();
-    runtime.run().unwrap();
+    runtime.shutdown_on_idle().wait().unwrap();
     0
+}
+
+fn launch_supervisor(supervisor_rx: mpsc::UnboundedReceiver<SupervisorCommand>, shutdown_tx: oneshot::Sender<()>) {
+    let turnstyle = Turnstyle::new();
+    let supervisor = supervisor_rx
+        .map_err(|_| CreationError::ListenerSpawnFailed)
+        .fold(turnstyle, |ts, command| {
+            match command {
+                SupervisorCommand::Launch => {
+                    let (version, waiter) = ts.join();
+                    launch_listeners(version, waiter)?;
+                },
+                SupervisorCommand::Reload => {
+                    let (version, waiter) = ts.join();
+                    launch_listeners(version, waiter)?;
+                    ts.turn();
+                },
+                SupervisorCommand::Shutdown => {
+                    ts.turn();
+                },
+            }
+
+            Ok(ts)
+        })
+        .then(move |result| {
+            if let Err(e) = result {
+                error!("[core supervisor] caught an error during launch/reload: {}", e);
+            }
+
+            shutdown_tx.send(())
+        });
+
+    tokio::spawn(typeless(supervisor));
+}
+
+fn launch_listeners(version: usize, close: Waiter) -> Result<(), CreationError> {
+    let configuration = Configuration::new().expect("failed to parse configuration");
+    let closer = close.shared();
+    let listeners = configuration
+        .listeners
+        .into_iter()
+        .map(|x| {
+            let close = closer.clone();
+            let config = x.clone();
+
+            listener::from_config(version, config, close)
+        })
+        .collect::<Vec<_>>();
+
+    let mut errors = Vec::new();
+    for listener in &listeners {
+        let result = listener.as_ref();
+        if result.is_err() {
+            let error = result.err().unwrap();
+            errors.push(error.to_string());
+        }
+    }
+
+    if !errors.is_empty() {
+        error!("[core] encountered errors while spawning listeners:");
+        for error in errors {
+            error!("[core] - {}", error);
+        }
+
+        return Err(CreationError::ListenerSpawnFailed);
+    }
+
+    // Launch all these listeners into the runtime.
+    for listener in listeners {
+        tokio::spawn(listener.unwrap());
+    }
+
+    Ok(())
 }
 
 // TODO: this should 100% be using either tower-web or warp.  it's super janky as-is.  it should
 // also move to the metrics module where we can simply spawn it after getting the service from a
 // builder function.
-fn launch_stats(port: u16, close: Shared<Waiter>) {
+fn launch_stats(port: u16, close: oneshot::Receiver<()>) {
     // Touch the global registry for the first time to initialize it.
     let facade = metrics::get_facade();
 
@@ -226,19 +274,20 @@ fn launch_stats(port: u16, close: Shared<Waiter>) {
                     output += "}";
 
                     ok(output)
-                }).and_then(|buf| io::write_all(socket, buf.into_bytes()).map_err(|_| ()))
+                })
+                .and_then(|buf| io::write_all(socket, buf.into_bytes()).map_err(|_| ()))
                 .and_then(|(c, _)| {
                     c.shutdown(Shutdown::Both).unwrap();
                     ok(())
                 })
-        }).select2(close)
+        })
+        .select2(close)
         .and_then(|_| {
-            debug!("[stats] closing stats listener");
+            trace!("[stats] closing stats listener");
             ok(())
-        }).map(|_| ())
-        .map_err(|_| ());
+        });
 
-    tokio::spawn(processor);
+    tokio::spawn(typeless(processor));
 }
 
 fn main() {

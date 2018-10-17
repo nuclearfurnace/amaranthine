@@ -21,6 +21,7 @@ use std::io;
 
 #[derive(Debug)]
 pub enum ProtocolError {
+    Empty,
     IoError(io::Error),
     InvalidProtocol,
     BackendClosedPrematurely,

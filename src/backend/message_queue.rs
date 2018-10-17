@@ -32,6 +32,7 @@ use metrics::{get_sink, Metrics};
 use slab::Slab;
 use std::collections::VecDeque;
 use tokio::io::{write_all, AsyncWrite};
+use util::typeless;
 
 /// Message state of queued messages.
 #[derive(Debug, PartialEq)]
@@ -202,13 +203,15 @@ where
                 }
 
                 write_all(tx, obuf).map_err(|_| ()).map(|(tx, _)| tx)
-            }).and_then(|_| {
+            })
+            .and_then(|_| {
                 trace!("[message queue send buffer] dropping");
                 ok(())
-            }).map_err(|_| {
+            })
+            .map_err(|_| {
                 get_sink().increment(Metrics::ClientTxErrors);
-            }).map(|_| ());
-        tokio::spawn(f);
+            });
+        tokio::spawn(typeless(f));
 
         let data = MessageQueue {
             input_closed: false,

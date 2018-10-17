@@ -17,7 +17,7 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use futures::stream::Stream;
+use futures::{future::Future, stream::Stream};
 
 mod batch;
 pub use self::batch::Batch;
@@ -48,4 +48,11 @@ pub trait StreamExt: Stream {
     {
         batch::new(self, capacity)
     }
+}
+
+pub fn typeless<F>(f: F) -> impl Future<Item = (), Error = ()>
+where
+    F: Future,
+{
+    f.map(|_| ()).map_err(|_| ())
 }

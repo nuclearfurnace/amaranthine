@@ -26,6 +26,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::timer::Delay;
+use util::typeless;
 
 pub(crate) struct BackendHealth {
     cooloff_enabled: bool,
@@ -91,16 +92,14 @@ impl BackendHealth {
         let error_count = self.error_count.clone();
         let updates_tx = self.updates_tx.clone();
         let deadline = Instant::now() + Duration::from_millis(self.cooloff_period_ms);
-        let delay = Delay::new(deadline)
-            .map_err(|_| ())
-            .then(move |_| {
-                debug!("[health] resetting cooloff");
-                in_cooloff.store(false, SeqCst);
-                error_count.store(0, SeqCst);
-                let _ = updates_tx.unbounded_send(());
-                ok(())
-            }).map(|_| ());
+        let delay = Delay::new(deadline).then(move |_| {
+            debug!("[health] resetting cooloff");
+            in_cooloff.store(false, SeqCst);
+            error_count.store(0, SeqCst);
+            let _ = updates_tx.unbounded_send(());
+            ok::<_, ()>(())
+        });
 
-        tokio::spawn(delay);
+        tokio::spawn(typeless(delay));
     }
 }

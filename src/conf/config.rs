@@ -36,6 +36,7 @@ pub struct LoggingConfiguration {
 pub struct ListenerConfiguration {
     pub protocol: String,
     pub address: String,
+    pub reload_timeout_ms: Option<u64>,
     pub pools: HashMap<String, PoolConfiguration>,
     pub routing: HashMap<String, String>,
 }
