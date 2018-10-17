@@ -27,6 +27,7 @@ before_install:
   - rustup self update
   - rustup install nightly
   - rustup default nightly
+  - which redis-server
 
 install:
   - sh ci/install.sh
