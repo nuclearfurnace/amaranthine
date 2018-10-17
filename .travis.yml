@@ -27,6 +27,8 @@ before_install:
     #  - rustup self update
     #  - rustup install nightly
     #  - rustup default nightly
+  - if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then brew update          ; fi
+  - if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then brew install redis; fi
   - bash -c 'which redis-server'
 
 install:
