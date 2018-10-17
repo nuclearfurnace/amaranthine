@@ -20,9 +20,7 @@
 mod errors;
 pub use self::errors::ProcessorError;
 
-use backend::{
-    message_queue::{MessageState, QueuedMessage},
-};
+use backend::message_queue::{MessageState, QueuedMessage};
 use futures::future::{Either, FutureResult};
 use std::{error::Error, io};
 use tokio::{

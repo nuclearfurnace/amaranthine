@@ -29,11 +29,11 @@ Here is a non-exhaustive checklist of what's done and what is a serious target:
 - [ ] memcached support
 - [x] Redis pipelining support
 - [x] basic connection multiplexing (M client conns over N server conns; configurable server connection limit)
-- [ ] advanced connection multiplexing (server backoff after failure, timeout on backend operations, etc)
+- [x] advanced connection multiplexing (server backoff after failure, timeout on backend operations, etc)
 - [x] basic routing strategies (single pool, traffic shadowing)\*
-- [ ] advanced routing strategies (warm up [cold before warm],  prefix routing, fallthrough, majority, fastest response)
+- [ ] advanced routing strategies (warm up [cold before warm], prefix routing, fallthrough, majority, fastest response)
 - [x] distribution (modulo vs ketama) and hashing (md5 vs sha vs fnv1a) support\*
-- [ ] online reconfiguration
+- [x] online reconfiguration
 - [x] metrics collection\*
 - [ ] TLS support
 
