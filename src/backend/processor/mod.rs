@@ -18,9 +18,35 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 mod errors;
-mod processor;
+pub use self::errors::ProcessorError;
 
-pub use self::{
-    errors::ProcessorError,
-    processor::{RequestProcessor, TcpStreamFuture},
+use backend::{
+    message_queue::{MessageState, QueuedMessage},
 };
+use futures::future::{Either, FutureResult};
+use std::{error::Error, io};
+use tokio::{
+    io::ReadHalf,
+    net::tcp::{ConnectFuture, TcpStream},
+};
+
+/// An existing or pending TcpStream.
+pub type TcpStreamFuture = Either<FutureResult<TcpStream, io::Error>, ConnectFuture>;
+
+/// Processors a request into a response by generating a future which will consume a given
+/// TcpStream to an underlying server, do its work, and hand back both the stream and the results.
+pub trait RequestProcessor {
+    type Message;
+    type ClientReader;
+    type Future;
+
+    fn fragment_messages(&self, Vec<Self::Message>) -> Result<Vec<(MessageState, Self::Message)>, ProcessorError>;
+    fn defragment_messages(&self, Vec<(MessageState, Self::Message)>) -> Result<Self::Message, ProcessorError>;
+
+    fn get_error_message(&self, Box<Error>) -> Self::Message;
+    fn get_error_message_str(&self, &str) -> Self::Message;
+
+    fn get_read_stream(&self, ReadHalf<TcpStream>) -> Self::ClientReader;
+
+    fn process(&self, Vec<QueuedMessage<Self::Message>>, TcpStreamFuture) -> Self::Future;
+}
