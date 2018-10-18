@@ -120,7 +120,7 @@ mod redis_tests {
         match conn.recv_response().err() {
             Some(e) => {
                 println!("quit conn error: {:?}", e);
-                assert!(e.is_connection_dropped())
+                assert!(e.is_connection_dropped() || e.kind() == RedisErrorKind::ResponseError)
             },
             None => panic!("call after quit should yield error"),
         }
