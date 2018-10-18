@@ -118,7 +118,10 @@ mod redis_tests {
         // receive the command should fail.
         let _ = conn.send_packed_command(b"ping\r\n").unwrap();
         match conn.recv_response().err() {
-            Some(e) => assert!(e.is_connection_dropped()),
+            Some(e) => {
+                println!("quit conn error: {:?}", e);
+                assert!(e.is_connection_dropped())
+            },
             None => panic!("call after quit should yield error"),
         }
     }
