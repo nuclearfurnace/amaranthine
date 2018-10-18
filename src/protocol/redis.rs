@@ -91,8 +91,7 @@ pub enum RedisMessage {
 
 impl RedisMessage {
     pub fn from_inline(cmd: &str) -> RedisMessage {
-        let s = cmd.clone();
-        let buf = s.as_bytes();
+        let buf = cmd.as_bytes();
         let mut rd = BytesMut::with_capacity(buf.len());
         rd.put_slice(&buf[..]);
 

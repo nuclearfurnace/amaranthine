@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 use super::{distributor, hasher};
-use backend::{backend::Backend, processor::RequestProcessor};
+use backend::{processor::RequestProcessor, Backend};
 use errors::CreationError;
 use futures::{prelude::*, sync::mpsc};
 use parking_lot::RwLock;

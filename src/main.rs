@@ -19,9 +19,6 @@
 // SOFTWARE.
 #![feature(test)]
 #![feature(nll)]
-#![feature(associated_type_defaults)]
-#![feature(duration_as_u128)]
-#![feature(option_replace)]
 #![recursion_limit = "1024"]
 
 #[macro_use]

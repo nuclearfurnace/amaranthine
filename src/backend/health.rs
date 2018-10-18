@@ -63,7 +63,7 @@ impl BackendHealth {
             return;
         }
 
-        let mut final_error_count = 0;
+        let mut final_error_count;
         loop {
             // Keep looping until we increment the counter.
             let curr_count = self.error_count.load(SeqCst);
