@@ -22,6 +22,7 @@ use btoi::btoi;
 use bytes::{BufMut, BytesMut};
 use common::Message;
 use futures::prelude::*;
+use itoa;
 use metrics::{self, MetricSink, Metrics};
 use protocol::errors::ProtocolError;
 use std::error::Error;
@@ -91,15 +92,38 @@ pub enum RedisMessage {
 
 impl RedisMessage {
     pub fn from_inline(cmd: &str) -> RedisMessage {
-        let buf = cmd.as_bytes();
-        let mut rd = BytesMut::with_capacity(buf.len());
-        rd.put_slice(&buf[..]);
+        let args = cmd
+            .split_whitespace()
+            .map(|part| {
+                let buf = part.as_bytes();
+                let mut new_buf = BytesMut::new();
+                new_buf.extend_from_slice(&[REDIS_COMMAND_DATA]);
 
-        let bulk = RedisMessage::Data(rd.clone(), 0);
-        let mut args = Vec::new();
-        args.push(bulk);
+                let mut cnt_buf = [b'\0'; 20];
+                let n = itoa::write(&mut cnt_buf[..], buf.len()).unwrap();
+                new_buf.extend_from_slice(&cnt_buf[..n]);
+                new_buf.extend_from_slice(b"\r\n");
+                new_buf.extend_from_slice(buf);
+                new_buf.extend_from_slice(b"\r\n");
 
-        RedisMessage::Bulk(rd, args)
+                RedisMessage::Data(new_buf, 1 + n + 2)
+            })
+            .collect::<Vec<_>>();
+
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&[REDIS_COMMAND_BULK]);
+
+        let mut cnt_buf = [b'\0'; 20];
+        let n = itoa::write(&mut cnt_buf[..], args.len()).unwrap();
+        buf.extend_from_slice(&cnt_buf[..n]);
+        buf.extend_from_slice(b"\r\n");
+
+        for arg in &args {
+            let arg_buf = arg.get_buf();
+            buf.unsplit(arg_buf);
+        }
+
+        RedisMessage::Bulk(buf, args)
     }
 
     pub fn from_status(status_str: &str) -> RedisMessage {
@@ -561,6 +585,17 @@ fn read_bulk(rd: &mut BytesMut) -> Poll<(usize, RedisMessage), ProtocolError> {
     // Slice off all the bytes we "read", updating the original in the process, and pass them along.
     let buf = rd.split_to(total);
     Ok(Async::Ready((total, RedisMessage::Bulk(buf, args))))
+}
+
+pub fn write_raw_message<T>(tx: T, msg: RedisMessage) -> impl Future<Item = (T, usize), Error = ProtocolError>
+where
+    T: AsyncWrite,
+{
+    let buf = msg.into_resp();
+    let buf_len = buf.len();
+    write_all(tx, buf)
+        .map(move |(tx, _buf)| (tx, buf_len))
+        .map_err(|e| e.into())
 }
 
 pub fn write_messages<T>(
