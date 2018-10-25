@@ -20,7 +20,7 @@ mod redis_tests {
         let (sd, _rd1, _rd2) = get_redis_daemons();
 
         // A simple set and then get.
-        let client = RedisClient::open(sd.get_conn_str()).unwrap();
+        let client = RedisClient::open(sd.get_fixed_conn_str()).unwrap();
         let conn = client.get_connection().unwrap();
         let _: () = conn.set("my_key", 42).unwrap();
         let value: isize = conn.get("my_key").unwrap();
@@ -32,7 +32,7 @@ mod redis_tests {
         let (sd, _rd1, _rd2) = get_redis_daemons();
 
         // A simple set and then get.
-        let client = RedisClient::open(sd.get_conn_str()).unwrap();
+        let client = RedisClient::open(sd.get_fixed_conn_str()).unwrap();
         let conn = client.get_connection().unwrap();
         let _: () = conn.set("key_one", 42).unwrap();
         let _: () = conn.set("key_two", 43).unwrap();
@@ -46,7 +46,7 @@ mod redis_tests {
         let (sd, _rd1, _rd2) = get_redis_daemons();
 
         // A simple set and then get.
-        let client = RedisClient::open(sd.get_conn_str()).unwrap();
+        let client = RedisClient::open(sd.get_fixed_conn_str()).unwrap();
         let conn = client.get_connection().unwrap();
 
         let _: () = conn.set("", 19).unwrap();
@@ -67,7 +67,7 @@ mod redis_tests {
         let (sd, _rd1, _rd2) = get_redis_daemons();
 
         // A simple set and then get.
-        let client = RedisClient::open(sd.get_conn_str()).unwrap();
+        let client = RedisClient::open(sd.get_fixed_conn_str()).unwrap();
         let conn = client.get_connection().unwrap();
 
         let _: () = conn.rpush("mylist", "Hello").unwrap();
@@ -81,7 +81,7 @@ mod redis_tests {
     fn test_large_insert_times_out() {
         let (sd, _rd1, _rd2) = get_redis_daemons();
 
-        let client = RedisClient::open(sd.get_conn_str()).unwrap();
+        let client = RedisClient::open(sd.get_fixed_conn_str()).unwrap();
         let conn = client.get_connection().unwrap();
 
         let mut hash_fields = Vec::new();
@@ -103,7 +103,7 @@ mod redis_tests {
     fn test_quit_drops_conn() {
         let (sd, _rd1, _rd2) = get_redis_daemons();
 
-        let client = RedisClient::open(sd.get_conn_str()).unwrap();
+        let client = RedisClient::open(sd.get_fixed_conn_str()).unwrap();
         let conn = client.get_connection().unwrap();
 
         let _: () = conn.set("", 19).unwrap();
@@ -127,10 +127,47 @@ mod redis_tests {
     }
 
     #[test]
+    fn test_traffic_shadowing() {
+        let (sd, rd1, rd2) = get_redis_daemons();
+
+        let client = RedisClient::open(sd.get_shadow_conn_str()).unwrap();
+        let conn = client.get_connection().unwrap();
+
+        // Set values directly on both Redis servers so we can distinguish between nodes when
+        // we eventually go through Synchrotron.
+        let r1client = RedisClient::open(rd1.get_conn_str()).unwrap();
+        let r1conn = r1client.get_connection().unwrap();
+
+        let _: () = r1conn.set("two", 1).unwrap();
+        let value1: isize = r1conn.get("two").unwrap();
+        assert_eq!(value1, 1);
+
+        let r2client = RedisClient::open(rd2.get_conn_str()).unwrap();
+        let r2conn = r2client.get_connection().unwrap();
+
+        let _: () = r2conn.set("two", 2).unwrap();
+        let value2: isize = r2conn.get("two").unwrap();
+        assert_eq!(value2, 2);
+
+        // Now set the value through Synchrotron.
+        let _: () = conn.set("two", 3).unwrap();
+
+        // Wait for a hot second just to make sure the shadow pool is hit.
+        thread::sleep(Duration::from_millis(50));
+
+        // Both pools should have the same value now.
+        let value3: isize = r1conn.get("two").unwrap();
+        assert_eq!(value3, 3);
+
+        let value4: isize = r2conn.get("two").unwrap();
+        assert_eq!(value4, 3);
+    }
+
+    #[test]
     fn test_backend_cooloff() {
         let (sd, rd1, rd2) = get_redis_daemons();
 
-        let client = RedisClient::open(sd.get_conn_str()).unwrap();
+        let client = RedisClient::open(sd.get_fixed_conn_str()).unwrap();
         let conn = client.get_connection().unwrap();
 
         // Set values directly on both Redis servers so we can distinguish between nodes when
@@ -164,7 +201,7 @@ mod redis_tests {
 
         // Now, try to ask Synchrotron for the value, five times.  Should be all errors.
         for _ in 0..5 {
-            let iclient = RedisClient::open(sd.get_conn_str()).unwrap();
+            let iclient = RedisClient::open(sd.get_fixed_conn_str()).unwrap();
             let iconn = iclient.get_connection().unwrap();
             let result: RedisResult<isize> = iconn.get("two");
             match result {
