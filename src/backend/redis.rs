@@ -23,15 +23,19 @@ use backend::{
 };
 use bytes::BytesMut;
 use common::Message;
-use futures::{future::ok, prelude::*};
+use futures::{
+    future::{ok, Either},
+    prelude::*,
+};
 use itoa;
 use protocol::{
     self,
     errors::ProtocolError,
     redis::{self, RedisMessage, RedisMessageStream},
 };
-use std::{borrow::Borrow, error::Error};
+use std::{borrow::Borrow, error::Error, net::SocketAddr};
 use tokio::{io::ReadHalf, net::TcpStream};
+use util::ProcessFuture;
 
 const REDIS_DEL: &[u8] = b"del";
 const REDIS_SET: &[u8] = b"set";
@@ -45,7 +49,6 @@ impl RedisRequestProcessor {
 
 impl RequestProcessor for RedisRequestProcessor {
     type ClientReader = RedisMessageStream<ReadHalf<TcpStream>>;
-    type Future = Box<Future<Item = TcpStream, Error = ProtocolError> + Send>;
     type Message = RedisMessage;
 
     fn fragment_messages(
@@ -66,13 +69,33 @@ impl RequestProcessor for RedisRequestProcessor {
         protocol::redis::read_messages_stream(client_rx)
     }
 
-    fn process(&self, req: Vec<QueuedMessage<Self::Message>>, stream: TcpStreamFuture) -> Self::Future {
+    fn preconnect(&self, addr: &SocketAddr, noreply: bool) -> ProcessFuture {
+        let inner = TcpStream::connect(addr)
+            .map_err(ProtocolError::IoError)
+            .and_then(move |conn| {
+                if noreply {
+                    let noreply_req = RedisMessage::from_inline("CLIENT REPLY OFF");
+                    Either::A(redis::write_raw_message(conn, noreply_req).map(|(server, _n)| server))
+                } else {
+                    Either::B(ok(conn))
+                }
+            });
+        ProcessFuture::new(inner)
+    }
+
+    fn process(&self, req: Vec<QueuedMessage<Self::Message>>, stream: TcpStreamFuture) -> ProcessFuture {
         let inner = stream
-            .map_err(|e| e.into())
             .and_then(move |server| redis::write_messages(server, req))
             .and_then(move |(server, msgs, _n)| redis::read_messages(server, msgs))
             .and_then(move |(server, _n)| ok(server));
-        Box::new(inner)
+        ProcessFuture::new(inner)
+    }
+
+    fn process_noreply(&self, req: Vec<QueuedMessage<Self::Message>>, stream: TcpStreamFuture) -> ProcessFuture {
+        let inner = stream
+            .and_then(move |server| redis::write_messages(server, req))
+            .and_then(move |(server, _msgs, _n)| ok(server));
+        ProcessFuture::new(inner)
     }
 }
 

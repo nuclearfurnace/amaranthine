@@ -38,13 +38,12 @@ use futures::{
     sync::mpsc,
     Poll,
 };
-use protocol::errors::ProtocolError;
 use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 use tokio::{
     net::tcp::TcpStream,
     timer::{timeout::Error as TimeoutError, Timeout},
 };
-use util::{WorkQueue, Worker};
+use util::{ProcessFuture, WorkQueue, Worker};
 
 type BackendWorkQueue<T> = Worker<Vec<QueuedMessage<T>>>;
 type MaybeTimeout<F> = Either<NotTimeout<F>, Timeout<F>>;
@@ -86,7 +85,6 @@ pub enum BackendCommand {
 struct BackendConnection<P, C>
 where
     P: RequestProcessor,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
     C: Future + Send,
 {
     processor: P,
@@ -95,15 +93,15 @@ where
     command_tx: mpsc::UnboundedSender<BackendCommand>,
     address: SocketAddr,
     timeout_ms: u64,
+    noreply: bool,
 
     socket: Option<TcpStream>,
-    current: Option<MaybeTimeout<P::Future>>,
+    current: Option<MaybeTimeout<ProcessFuture>>,
 }
 
 impl<P, C> Future for BackendConnection<P, C>
 where
     P: RequestProcessor,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
     C: Future + Send,
 {
     type Error = ();
@@ -143,10 +141,14 @@ where
                 Ok(Async::Ready(Some(batch))) => {
                     let socket = match self.socket.take() {
                         Some(socket) => Either::A(ok(socket)),
-                        None => Either::B(TcpStream::connect(&self.address)),
+                        None => Either::B(self.processor.preconnect(&self.address, self.noreply)),
                     };
 
-                    let inner = self.processor.process(batch, socket);
+                    let inner = if self.noreply {
+                        self.processor.process_noreply(batch, socket)
+                    } else {
+                        self.processor.process(batch, socket)
+                    };
                     let work = if self.timeout_ms == 0 {
                         Either::A(NotTimeout { inner })
                     } else {
@@ -168,7 +170,6 @@ where
 impl<P, C> Drop for BackendConnection<P, C>
 where
     P: RequestProcessor,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
     C: Future + Send,
 {
     fn drop(&mut self) {
@@ -190,7 +191,6 @@ pub struct BackendSupervisor<P, C>
 where
     P: RequestProcessor + Clone + Send + 'static,
     P::Message: Send,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
     C: Future + Clone + Send + 'static,
 {
     processor: P,
@@ -204,6 +204,7 @@ where
     conn_count: usize,
     conn_limit: usize,
     timeout_ms: u64,
+    noreply: bool,
 
     close: C,
 }
@@ -212,7 +213,6 @@ impl<P, C> Future for BackendSupervisor<P, C>
 where
     P: RequestProcessor + Clone + Send + 'static,
     P::Message: Send,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
     C: Future + Clone + Send + 'static,
 {
     type Error = ();
@@ -253,6 +253,7 @@ where
                 address: self.address,
                 command_tx: self.command_tx.clone(),
                 timeout_ms: self.timeout_ms,
+                noreply: self.noreply,
                 current: None,
                 socket: None,
             };
@@ -270,7 +271,6 @@ impl<P, C> Drop for BackendSupervisor<P, C>
 where
     P: RequestProcessor + Clone + Send + 'static,
     P::Message: Send,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
     C: Future + Clone + Send + 'static,
 {
     fn drop(&mut self) {
@@ -285,7 +285,6 @@ fn new_supervisor<P, C>(
 where
     P: RequestProcessor + Clone + Send,
     P::Message: Send,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
     C: Future + Clone + Send + 'static,
 {
     let conn_limit_raw = options.entry("conns".to_owned()).or_insert_with(|| "1".to_owned());
@@ -298,6 +297,12 @@ where
         .or_insert_with(|| "1000".to_owned());
     let timeout_ms = u64::from_str(timeout_ms_raw.as_str())
         .map_err(|_| CreationError::InvalidParameter("options.timeout_ms".to_string()))?;
+
+    let noreply_raw = options
+        .entry("noreply".to_owned())
+        .or_insert_with(|| "false".to_owned());
+    let noreply = bool::from_str(noreply_raw.as_str())
+        .map_err(|_| CreationError::InvalidParameter("options.noreply".to_string()))?;
 
     let (command_tx, command_rx) = mpsc::unbounded();
 
@@ -314,6 +319,7 @@ where
         conn_count: 0,
         conn_limit,
         timeout_ms,
+        noreply,
 
         close,
     })
@@ -334,7 +340,6 @@ pub struct Backend<P>
 where
     P: RequestProcessor + Clone + Send,
     P::Message: Send,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
     health: Arc<BackendHealth>,
     work_queue: WorkQueue<Vec<QueuedMessage<P::Message>>>,
@@ -344,7 +349,6 @@ impl<P> Backend<P>
 where
     P: RequestProcessor + Clone + Send,
     P::Message: Send,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
     pub fn new<C>(
         addr: SocketAddr, processor: P, mut options: HashMap<String, String>, updates_tx: mpsc::UnboundedSender<()>,
@@ -353,7 +357,6 @@ where
     where
         P: RequestProcessor + Clone + Send,
         P::Message: Send,
-        P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
         C: Future + Clone + Send,
     {
         let conn_limit_raw = options.entry("conns".to_owned()).or_insert_with(|| "1".to_owned());
@@ -408,7 +411,6 @@ impl<P> Drop for Backend<P>
 where
     P: RequestProcessor + Clone + Send,
     P::Message: Send,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
     fn drop(&mut self) {
         trace!("[backend] dropping");

@@ -18,7 +18,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 mod errors;
-mod fixed;
-mod router;
+pub use self::errors::RouterError;
 
-pub use self::{errors::RouterError, fixed::FixedRouter, router::Router};
+mod fixed;
+mod shadow;
+pub use self::{fixed::FixedRouter, shadow::ShadowRouter};
+
+mod router;
+pub use self::router::Router;

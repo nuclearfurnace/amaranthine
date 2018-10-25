@@ -31,11 +31,11 @@ use futures_turnstyle::Waiter;
 use metrics::{self, Metrics};
 use net2::TcpBuilder;
 use protocol::errors::ProtocolError;
-use routing::{FixedRouter, Router};
+use routing::{FixedRouter, Router, ShadowRouter};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 use tokio::{
     io::{self, AsyncRead},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     reactor,
 };
 use tokio_evacuate::{Evacuate, Warden};
@@ -82,9 +82,8 @@ fn routing_from_config<P, C>(
 ) -> Result<GenericRuntimeFuture, CreationError>
 where
     P: RequestProcessor + Clone + Send + 'static,
-    P::Message: Message + Send + 'static,
+    P::Message: Message + Clone + Send + 'static,
     P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
     C: Future + Clone + Send + 'static,
 {
     let reload_timeout_ms = config.reload_timeout_ms.unwrap_or_else(|| 5000);
@@ -117,6 +116,7 @@ where
         .to_lowercase();
     match route_type.as_str() {
         "fixed" => get_fixed_router(listener, pools, processor, warden, closer.clone()),
+        "shadow" => get_shadow_router(listener, pools, processor, warden, closer.clone()),
         x => Err(CreationError::InvalidResource(format!("unknown route type '{}'", x))),
     }
 }
@@ -126,9 +126,8 @@ fn get_fixed_router<P, C>(
 ) -> Result<GenericRuntimeFuture, CreationError>
 where
     P: RequestProcessor + Clone + Send + 'static,
-    P::Message: Message + Send + 'static,
+    P::Message: Message + Clone + Send + 'static,
     P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
     C: Future + Clone + Send + 'static,
 {
     // Construct an instance of our router.
@@ -140,14 +139,35 @@ where
     build_router_chain(listener, processor, router, warden, close)
 }
 
+fn get_shadow_router<P, C>(
+    listener: TcpListener, pools: HashMap<String, Arc<BackendPool<P>>>, processor: P, warden: Warden, close: C,
+) -> Result<GenericRuntimeFuture, CreationError>
+where
+    P: RequestProcessor + Clone + Send + 'static,
+    P::Message: Message + Clone + Send + 'static,
+    P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
+    C: Future + Clone + Send + 'static,
+{
+    // Construct an instance of our router.
+    let default_pool = pools
+        .get("default")
+        .ok_or_else(|| CreationError::InvalidResource("no default pool configured for shadow router".to_string()))?;
+    let shadow_pool = pools
+        .get("shadow")
+        .ok_or_else(|| CreationError::InvalidResource("no shadow pool configured for shadow router".to_string()))?;
+
+    let router = ShadowRouter::new(processor.clone(), default_pool.clone(), shadow_pool.clone());
+
+    build_router_chain(listener, processor, router, warden, close)
+}
+
 fn build_router_chain<P, R, C>(
     listener: TcpListener, processor: P, router: R, warden: Warden, close: C,
 ) -> Result<GenericRuntimeFuture, CreationError>
 where
     P: RequestProcessor + Clone + Send + 'static,
-    P::Message: Message + Send + 'static,
+    P::Message: Message + Clone + Send + 'static,
     P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
     R: Router<P> + Clone + Send + 'static,
     C: Future + Clone + Send + 'static,
 {
