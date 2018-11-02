@@ -19,7 +19,7 @@
 // SOFTWARE.
 use backend::{
     message_queue::{MessageState, QueuedMessage},
-    processor::{ProcessorError, RequestProcessor, TcpStreamFuture},
+    processor::{Processor, ProcessorError, TcpStreamFuture},
 };
 use bytes::BytesMut;
 use common::Message;
@@ -41,13 +41,13 @@ const REDIS_DEL: &[u8] = b"del";
 const REDIS_SET: &[u8] = b"set";
 
 #[derive(Clone)]
-pub struct RedisRequestProcessor;
+pub struct RedisProcessor;
 
-impl RedisRequestProcessor {
-    pub fn new() -> RedisRequestProcessor { RedisRequestProcessor {} }
+impl RedisProcessor {
+    pub fn new() -> RedisProcessor { RedisProcessor {} }
 }
 
-impl RequestProcessor for RedisRequestProcessor {
+impl Processor for RedisProcessor {
     type ClientReader = RedisMessageStream<ReadHalf<TcpStream>>;
     type Message = RedisMessage;
 

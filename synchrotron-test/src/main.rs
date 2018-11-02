@@ -161,6 +161,21 @@ mod redis_tests {
 
         let value4: isize = r2conn.get("two").unwrap();
         assert_eq!(value4, 3);
+
+        // Do it through Synchrotron one more time to show the shadow backend isn't locked up or
+        // anything.
+        let _: () = conn.set("two", 4).unwrap();
+
+        // Wait for a hot second just to make sure the shadow pool is hit.
+        thread::sleep(Duration::from_millis(50));
+
+        // Both pools should have the same value now.
+        let value3: isize = r1conn.get("two").unwrap();
+        assert_eq!(value3, 4);
+
+        let value4: isize = r2conn.get("two").unwrap();
+        assert_eq!(value4, 4);
+
     }
 
     #[test]

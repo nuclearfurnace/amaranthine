@@ -17,7 +17,7 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::{message_queue::QueuedMessage, pool::BackendPool, processor::RequestProcessor};
+use backend::{message_queue::QueuedMessage, pool::BackendPool, processor::Processor};
 use common::Message;
 use routing::{Router, RouterError};
 use std::{collections::HashMap, sync::Arc};
@@ -25,7 +25,7 @@ use std::{collections::HashMap, sync::Arc};
 #[derive(Clone)]
 pub struct ShadowRouter<P>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Message + Clone + Send,
 {
     processor: P,
@@ -35,7 +35,7 @@ where
 
 impl<P> ShadowRouter<P>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Message + Clone + Send,
 {
     pub fn new(processor: P, default_pool: Arc<BackendPool<P>>, shadow_pool: Arc<BackendPool<P>>) -> ShadowRouter<P> {
@@ -49,7 +49,7 @@ where
 
 impl<P> Router<P> for ShadowRouter<P>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Message + Clone + Send,
 {
     fn route(&self, req: Vec<QueuedMessage<P::Message>>) -> Result<(), RouterError> {

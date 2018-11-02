@@ -17,7 +17,7 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::processor::{ProcessorError, RequestProcessor};
+use backend::processor::{Processor, ProcessorError};
 use bytes::BytesMut;
 use common::Message;
 use futures::{
@@ -185,7 +185,7 @@ enum QueueControlMessage<M> {
 /// the queue in order to hand back the response so it can be sent to the client.
 pub struct MessageQueue<P>
 where
-    P: RequestProcessor + Send + 'static,
+    P: Processor + Send + 'static,
 {
     input_closed: bool,
     output_closed: bool,
@@ -209,7 +209,7 @@ where
 
 impl<P> MessageQueue<P>
 where
-    P: RequestProcessor + Send + 'static,
+    P: Processor + Send + 'static,
     P::Message: Message + Clone,
 {
     pub fn new<T>(processor: P, tx: T) -> (MessageQueue<P>, MessageQueueControlPlane<P>)
@@ -363,7 +363,7 @@ where
 
 impl<P> Future for MessageQueue<P>
 where
-    P: RequestProcessor + Send + 'static,
+    P: Processor + Send + 'static,
     P::Message: Message + Clone,
 {
     type Error = ();
@@ -501,7 +501,7 @@ where
 
 impl<P> Drop for MessageQueue<P>
 where
-    P: RequestProcessor + Send,
+    P: Processor + Send,
 {
     fn drop(&mut self) {
         trace!("[message queue] dropping");
@@ -513,14 +513,14 @@ where
 /// Allows operating with a message queue at runtime, once it has been spawned and no longer owned.
 pub struct MessageQueueControlPlane<P>
 where
-    P: RequestProcessor + Send + 'static,
+    P: Processor + Send + 'static,
 {
     control_tx: UnboundedSender<QueueControlMessage<P::Message>>,
 }
 
 impl<P> MessageQueueControlPlane<P>
 where
-    P: RequestProcessor + Send + 'static,
+    P: Processor + Send + 'static,
 {
     /// Queues a set of messages in this message queue, allocating a slot for a response for each
     /// message.  Queued messages have a reference back to this message queue in order to notify it.
@@ -536,7 +536,7 @@ where
 
 impl<P> Drop for MessageQueueControlPlane<P>
 where
-    P: RequestProcessor + Send + 'static,
+    P: Processor + Send + 'static,
 {
     fn drop(&mut self) {
         trace!("[message queue control plane] dropping");

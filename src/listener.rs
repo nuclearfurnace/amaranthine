@@ -17,9 +17,7 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::{
-    message_queue::MessageQueue, pool::BackendPool, processor::RequestProcessor, redis::RedisRequestProcessor,
-};
+use backend::{message_queue::MessageQueue, pool::BackendPoolBuilder, processor::Processor, redis::RedisProcessor};
 use common::Message;
 use conf::ListenerConfiguration;
 use errors::CreationError;
@@ -32,7 +30,7 @@ use metrics::{self, Metrics};
 use net2::TcpBuilder;
 use protocol::errors::ProtocolError;
 use routing::{FixedRouter, Router, ShadowRouter};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
+use std::{collections::HashMap, net::SocketAddr, time::Instant};
 use tokio::{
     io::{self, AsyncRead},
     net::TcpListener,
@@ -58,7 +56,7 @@ pub fn from_config(
     // Now build our handler: this is what's actually going to do the real work.
     let protocol = config.protocol.to_lowercase();
     let handler = match protocol.as_str() {
-        "redis" => routing_from_config(config, listener, close.clone(), RedisRequestProcessor::new()),
+        "redis" => routing_from_config(config, listener, close.clone(), RedisProcessor::new()),
         s => Err(CreationError::InvalidResource(format!("unknown cache protocol: {}", s))),
     }?;
 
@@ -81,7 +79,7 @@ fn routing_from_config<P, C>(
     config: ListenerConfiguration, listener: TcpListener, close: C, processor: P,
 ) -> Result<GenericRuntimeFuture, CreationError>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Message + Clone + Send + 'static,
     P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
     C: Future + Clone + Send + 'static,
@@ -102,9 +100,7 @@ where
             config.address.clone()
         );
 
-        let opts = pool_config.options.unwrap_or_else(HashMap::new);
-
-        let pool = BackendPool::new(&pool_config.addresses, processor.clone(), opts, closer.clone())?;
+        let pool = BackendPoolBuilder::new(processor.clone(), closer.clone(), pool_config);
         pools.insert(pool_name, pool);
     }
 
@@ -122,41 +118,46 @@ where
 }
 
 fn get_fixed_router<P, C>(
-    listener: TcpListener, pools: HashMap<String, Arc<BackendPool<P>>>, processor: P, warden: Warden, close: C,
+    listener: TcpListener, mut pools: HashMap<String, BackendPoolBuilder<P, C>>, processor: P, warden: Warden, close: C,
 ) -> Result<GenericRuntimeFuture, CreationError>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Message + Clone + Send + 'static,
     P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
     C: Future + Clone + Send + 'static,
 {
     // Construct an instance of our router.
     let default_pool = pools
-        .get("default")
-        .ok_or_else(|| CreationError::InvalidResource("no default pool configured for fixed router".to_string()))?;
-    let router = FixedRouter::new(processor.clone(), default_pool.clone());
+        .remove("default")
+        .ok_or_else(|| CreationError::InvalidResource("no default pool configured for fixed router".to_string()))?
+        .build()?;
+    let router = FixedRouter::new(processor.clone(), default_pool);
 
     build_router_chain(listener, processor, router, warden, close)
 }
 
 fn get_shadow_router<P, C>(
-    listener: TcpListener, pools: HashMap<String, Arc<BackendPool<P>>>, processor: P, warden: Warden, close: C,
+    listener: TcpListener, mut pools: HashMap<String, BackendPoolBuilder<P, C>>, processor: P, warden: Warden, close: C,
 ) -> Result<GenericRuntimeFuture, CreationError>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Message + Clone + Send + 'static,
     P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
     C: Future + Clone + Send + 'static,
 {
     // Construct an instance of our router.
     let default_pool = pools
-        .get("default")
-        .ok_or_else(|| CreationError::InvalidResource("no default pool configured for shadow router".to_string()))?;
-    let shadow_pool = pools
-        .get("shadow")
-        .ok_or_else(|| CreationError::InvalidResource("no shadow pool configured for shadow router".to_string()))?;
+        .remove("default")
+        .ok_or_else(|| CreationError::InvalidResource("no default pool configured for shadow router".to_string()))?
+        .build()?;
 
-    let router = ShadowRouter::new(processor.clone(), default_pool.clone(), shadow_pool.clone());
+    let shadow_pool = pools
+        .remove("shadow")
+        .ok_or_else(|| CreationError::InvalidResource("no shadow pool configured for shadow router".to_string()))?
+        .set_noreply(true)
+        .build()?;
+
+    let router = ShadowRouter::new(processor.clone(), default_pool, shadow_pool);
 
     build_router_chain(listener, processor, router, warden, close)
 }
@@ -165,7 +166,7 @@ fn build_router_chain<P, R, C>(
     listener: TcpListener, processor: P, router: R, warden: Warden, close: C,
 ) -> Result<GenericRuntimeFuture, CreationError>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Message + Clone + Send + 'static,
     P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
     R: Router<P> + Clone + Send + 'static,

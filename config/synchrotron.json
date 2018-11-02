@@ -36,9 +36,6 @@
         },
         "shadow": {
           "addresses": ["127.0.0.1:6387"],
-          "options": {
-            "noreply": "true"
-          }
         }
       },
       "routing": {

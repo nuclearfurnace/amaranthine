@@ -29,7 +29,7 @@ pub mod redis;
 pub use self::errors::BackendError;
 
 use backend::{
-    distributor::BackendDescriptor, health::BackendHealth, message_queue::QueuedMessage, processor::RequestProcessor,
+    distributor::BackendDescriptor, health::BackendHealth, message_queue::QueuedMessage, processor::Processor,
 };
 use errors::CreationError;
 use futures::{
@@ -84,7 +84,7 @@ pub enum BackendCommand {
 /// supervisor, so that it can be replaced.
 struct BackendConnection<P, C>
 where
-    P: RequestProcessor,
+    P: Processor,
     C: Future + Send,
 {
     processor: P,
@@ -101,7 +101,7 @@ where
 
 impl<P, C> Future for BackendConnection<P, C>
 where
-    P: RequestProcessor,
+    P: Processor,
     C: Future + Send,
 {
     type Error = ();
@@ -169,7 +169,7 @@ where
 
 impl<P, C> Drop for BackendConnection<P, C>
 where
-    P: RequestProcessor,
+    P: Processor,
     C: Future + Send,
 {
     fn drop(&mut self) {
@@ -189,7 +189,7 @@ where
 /// other.
 pub struct BackendSupervisor<P, C>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Send,
     C: Future + Clone + Send + 'static,
 {
@@ -211,7 +211,7 @@ where
 
 impl<P, C> Future for BackendSupervisor<P, C>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Send,
     C: Future + Clone + Send + 'static,
 {
@@ -269,7 +269,7 @@ where
 
 impl<P, C> Drop for BackendSupervisor<P, C>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Send,
     C: Future + Clone + Send + 'static,
 {
@@ -280,10 +280,10 @@ where
 
 fn new_supervisor<P, C>(
     processor: P, addr: SocketAddr, mut options: HashMap<String, String>, worker: BackendWorkQueue<P::Message>,
-    health: Arc<BackendHealth>, updates_tx: mpsc::UnboundedSender<()>, close: C,
+    health: Arc<BackendHealth>, noreply: bool, updates_tx: mpsc::UnboundedSender<()>, close: C,
 ) -> Result<BackendSupervisor<P, C>, CreationError>
 where
-    P: RequestProcessor + Clone + Send,
+    P: Processor + Clone + Send,
     P::Message: Send,
     C: Future + Clone + Send + 'static,
 {
@@ -297,12 +297,6 @@ where
         .or_insert_with(|| "1000".to_owned());
     let timeout_ms = u64::from_str(timeout_ms_raw.as_str())
         .map_err(|_| CreationError::InvalidParameter("options.timeout_ms".to_string()))?;
-
-    let noreply_raw = options
-        .entry("noreply".to_owned())
-        .or_insert_with(|| "false".to_owned());
-    let noreply = bool::from_str(noreply_raw.as_str())
-        .map_err(|_| CreationError::InvalidParameter("options.noreply".to_string()))?;
 
     let (command_tx, command_rx) = mpsc::unbounded();
 
@@ -338,7 +332,7 @@ where
 /// states, recycling connections and pausing work when required.
 pub struct Backend<P>
 where
-    P: RequestProcessor + Clone + Send,
+    P: Processor + Clone + Send,
     P::Message: Send,
 {
     health: Arc<BackendHealth>,
@@ -347,15 +341,15 @@ where
 
 impl<P> Backend<P>
 where
-    P: RequestProcessor + Clone + Send,
+    P: Processor + Clone + Send,
     P::Message: Send,
 {
     pub fn new<C>(
         addr: SocketAddr, processor: P, mut options: HashMap<String, String>, updates_tx: mpsc::UnboundedSender<()>,
-        close: C,
+        noreply: bool, close: C,
     ) -> Result<(Backend<P>, BackendSupervisor<P, C>), CreationError>
     where
-        P: RequestProcessor + Clone + Send,
+        P: Processor + Clone + Send,
         P::Message: Send,
         C: Future + Clone + Send,
     {
@@ -395,7 +389,7 @@ where
             work_queue,
             health: health.clone(),
         };
-        let runner = new_supervisor(processor, addr, options, worker, health, updates_tx, close)?;
+        let runner = new_supervisor(processor, addr, options, worker, health, noreply, updates_tx, close)?;
 
         Ok((backend, runner))
     }
@@ -409,7 +403,7 @@ where
 
 impl<P> Drop for Backend<P>
 where
-    P: RequestProcessor + Clone + Send,
+    P: Processor + Clone + Send,
     P::Message: Send,
 {
     fn drop(&mut self) {

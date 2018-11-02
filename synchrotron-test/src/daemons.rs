@@ -39,10 +39,7 @@ fn get_redis_config(stats_port: u16, listen1_port: u16, listen2_port: u16, redis
                             "addresses": ["127.0.0.1:{redis1_port}"]
                         }},
                         "shadow": {{
-                            "addresses": ["127.0.0.1:{redis2_port}"],
-                            "options": {{
-                                "noreply": "true"
-                            }}
+                            "addresses": ["127.0.0.1:{redis2_port}"]
                         }}
                     }},
                     "routing": {{

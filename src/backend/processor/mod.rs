@@ -30,9 +30,8 @@ use util::ProcessFuture;
 /// An existing or pending TcpStream.
 pub type TcpStreamFuture = Either<FutureResult<TcpStream, ProtocolError>, ProcessFuture>;
 
-/// Processors a request into a response by generating a future which will consume a given
-/// TcpStream to an underlying server, do its work, and hand back both the stream and the results.
-pub trait RequestProcessor {
+/// Cache-specific logic for processing requests and interacting with backends.
+pub trait Processor {
     type Message;
     type ClientReader;
 
