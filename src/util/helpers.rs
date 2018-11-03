@@ -17,12 +17,27 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-mod errors;
-pub use self::errors::RouterError;
+use futures::prelude::*;
+use protocol::errors::ProtocolError;
+use tokio::net::tcp::TcpStream;
 
-mod fixed;
-mod shadow;
-pub use self::{fixed::FixedRouter, shadow::ShadowRouter};
+/// Wraps any future that does protocol operations and hands back a TCP stream.
+pub struct ProcessFuture {
+    inner: Box<Future<Item = TcpStream, Error = ProtocolError> + Send + 'static>,
+}
 
-mod router;
-pub use self::router::Router;
+impl ProcessFuture {
+    pub fn new<F>(inner: F) -> ProcessFuture
+    where
+        F: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
+    {
+        ProcessFuture { inner: Box::new(inner) }
+    }
+}
+
+impl Future for ProcessFuture {
+    type Error = ProtocolError;
+    type Item = TcpStream;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> { self.inner.poll() }
+}

@@ -18,19 +18,17 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 use super::{distributor, hasher};
-use backend::{processor::RequestProcessor, Backend};
+use backend::{processor::Processor, Backend};
+use conf::PoolConfiguration;
 use errors::CreationError;
 use futures::{prelude::*, sync::mpsc};
 use parking_lot::RwLock;
-use protocol::errors::ProtocolError;
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-use tokio::net::TcpStream;
+use std::{collections::HashMap, sync::Arc};
 
 pub struct BackendPool<P>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Send,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
     distributor: RwLock<Box<distributor::Distributor + Send + Sync>>,
     hasher: Box<hasher::KeyHasher + Send + Sync>,
@@ -39,9 +37,8 @@ where
 
 pub struct BackendPoolSupervisor<P, C>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Send,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
     C: Future + Send + 'static,
 {
     pool: Arc<BackendPool<P>>,
@@ -49,83 +46,25 @@ where
     close: C,
 }
 
+pub struct BackendPoolBuilder<P, C>
+where
+    P: Processor + Clone + Send + 'static,
+    P::Message: Send,
+    C: Future + Send + 'static,
+{
+    processor: P,
+    close: C,
+    config: PoolConfiguration,
+    noreply: bool,
+}
+
 impl<P> BackendPool<P>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Send,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
-    pub fn new<C>(
-        addresses: &[SocketAddr], processor: P, mut options: HashMap<String, String>, close: C,
-    ) -> Result<Arc<BackendPool<P>>, CreationError>
-    where
-        P: RequestProcessor + Clone + Send + 'static,
-        P::Message: Send,
-        P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
-        C: Future + Clone + Send + 'static,
-    {
-        let dist_type = options
-            .entry("distribution".to_owned())
-            .or_insert_with(|| "modulo".to_owned())
-            .to_lowercase();
-        let mut distributor = distributor::configure_distributor(&dist_type)?;
-        debug!("[listener] using distributor '{}'", dist_type);
-
-        let hash_type = options
-            .entry("hash".to_owned())
-            .or_insert_with(|| "fnv1a_64".to_owned())
-            .to_lowercase();
-        let hasher = hasher::configure_hasher(&hash_type)?;
-        debug!("[listener] using hasher '{}'", hash_type);
-
-        // Assemble the list of backends and backend descriptors.
-        let mut backends = vec![];
-        let mut descriptors = vec![];
-        let (updates_tx, updates_rx) = mpsc::unbounded();
-
-        for address in addresses {
-            // Create the backend and the backend supervisor.  We spawn the supervisor which deals
-            // with spawning new backend connections when we're under our limit or a connection has
-            // an error and closes.  The backend itself is simply a facade to the work queue by
-            // which we submit request batches to be processed.
-            let (backend, runner) = Backend::new(
-                *address,
-                processor.clone(),
-                options.clone(),
-                updates_tx.clone(),
-                close.clone(),
-            )?;
-            let descriptor = backend.get_descriptor();
-            backends.push(backend);
-            tokio::spawn(runner);
-
-            // The backend descriptor is a facade we pass to the distributor to provide the
-            // necessary information needed to configure the distributor without having to hold an
-            // actual reference to the backends.
-            descriptors.push(descriptor);
-        }
-
-        // Seed/update the distributor.
-        distributor.seed(descriptors);
-
-        let pool = Arc::new(BackendPool {
-            backends,
-            distributor: RwLock::new(distributor),
-            hasher,
-        });
-
-        let supervisor = BackendPoolSupervisor {
-            pool: pool.clone(),
-            updates_rx,
-            close,
-        };
-        tokio::spawn(supervisor);
-
-        Ok(pool)
-    }
-
     pub fn update_distributor(&self) {
-        trace!("forced distributor update");
+        trace!("[backend pool] distributor update triggered");
 
         // Tally up the healthy backends.
         let mut healthy_backends = vec![];
@@ -156,20 +95,107 @@ where
 
 impl<P> Drop for BackendPool<P>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Send,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
 {
     fn drop(&mut self) {
         trace!("[backend pool] dropping");
     }
 }
 
+impl<P, C> BackendPoolBuilder<P, C>
+where
+    P: Processor + Clone + Send + 'static,
+    P::Message: Send,
+    C: Future + Clone + Send + 'static,
+{
+    pub fn new(processor: P, close: C, config: PoolConfiguration) -> BackendPoolBuilder<P, C> {
+        BackendPoolBuilder {
+            processor,
+            close,
+            config,
+            noreply: false,
+        }
+    }
+
+    pub fn set_noreply(mut self, noreply: bool) -> Self {
+        self.noreply = noreply;
+        self
+    }
+
+    pub fn build(self) -> Result<Arc<BackendPool<P>>, CreationError>
+    where
+        P: Processor + Clone + Send + 'static,
+        P::Message: Send,
+        C: Future + Clone + Send + 'static,
+    {
+        let mut options = self.config.options.unwrap_or_else(HashMap::new);
+        let dist_type = options
+            .entry("distribution".to_owned())
+            .or_insert_with(|| "modulo".to_owned())
+            .to_lowercase();
+        let mut distributor = distributor::configure_distributor(&dist_type)?;
+        debug!("[listener] using distributor '{}'", dist_type);
+
+        let hash_type = options
+            .entry("hash".to_owned())
+            .or_insert_with(|| "fnv1a_64".to_owned())
+            .to_lowercase();
+        let hasher = hasher::configure_hasher(&hash_type)?;
+        debug!("[listener] using hasher '{}'", hash_type);
+
+        // Assemble the list of backends and backend descriptors.
+        let mut backends = vec![];
+        let mut descriptors = vec![];
+        let (updates_tx, updates_rx) = mpsc::unbounded();
+
+        for address in &self.config.addresses {
+            // Create the backend and the backend supervisor.  We spawn the supervisor which deals
+            // with spawning new backend connections when we're under our limit or a connection has
+            // an error and closes.  The backend itself is simply a facade to the work queue by
+            // which we submit request batches to be processed.
+            let (backend, runner) = Backend::new(
+                *address,
+                self.processor.clone(),
+                options.clone(),
+                updates_tx.clone(),
+                self.noreply,
+                self.close.clone(),
+            )?;
+            let descriptor = backend.get_descriptor();
+            backends.push(backend);
+            tokio::spawn(runner);
+
+            // The backend descriptor is a facade we pass to the distributor to provide the
+            // necessary information needed to configure the distributor without having to hold an
+            // actual reference to the backends.
+            descriptors.push(descriptor);
+        }
+
+        // Seed/update the distributor.
+        distributor.seed(descriptors);
+
+        let pool = Arc::new(BackendPool {
+            backends,
+            distributor: RwLock::new(distributor),
+            hasher,
+        });
+
+        let supervisor = BackendPoolSupervisor {
+            pool: pool.clone(),
+            updates_rx,
+            close: self.close,
+        };
+        tokio::spawn(supervisor);
+
+        Ok(pool)
+    }
+}
+
 impl<P, C> Future for BackendPoolSupervisor<P, C>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Send,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
     C: Future + Send,
 {
     type Error = ();
@@ -203,9 +229,8 @@ where
 
 impl<P, C> Drop for BackendPoolSupervisor<P, C>
 where
-    P: RequestProcessor + Clone + Send + 'static,
+    P: Processor + Clone + Send + 'static,
     P::Message: Send,
-    P::Future: Future<Item = TcpStream, Error = ProtocolError> + Send + 'static,
     C: Future + Send,
 {
     fn drop(&mut self) {

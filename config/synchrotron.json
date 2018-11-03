@@ -26,7 +26,21 @@
       "routing": {
         "type": "fixed"
       }
+    },
+    {
+      "protocol": "redis",
+      "address": "127.0.0.1:6384",
+      "pools": {
+        "default": {
+          "addresses": ["127.0.0.1:6385", "127.0.0.1:6386"]
+        },
+        "shadow": {
+          "addresses": ["127.0.0.1:6387"],
+        }
+      },
+      "routing": {
+        "type": "shadow"
+      }
     }
-
   ]
 }

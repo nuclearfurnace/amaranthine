@@ -23,47 +23,70 @@ use routing::{Router, RouterError};
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone)]
-pub struct FixedRouter<P>
+pub struct ShadowRouter<P>
 where
     P: Processor + Clone + Send + 'static,
-    P::Message: Message + Send,
+    P::Message: Message + Clone + Send,
 {
     processor: P,
-    pool: Arc<BackendPool<P>>,
+    default_pool: Arc<BackendPool<P>>,
+    shadow_pool: Arc<BackendPool<P>>,
 }
 
-impl<P> FixedRouter<P>
+impl<P> ShadowRouter<P>
 where
     P: Processor + Clone + Send + 'static,
-    P::Message: Message + Send,
+    P::Message: Message + Clone + Send,
 {
-    pub fn new(processor: P, pool: Arc<BackendPool<P>>) -> FixedRouter<P> { FixedRouter { processor, pool } }
+    pub fn new(processor: P, default_pool: Arc<BackendPool<P>>, shadow_pool: Arc<BackendPool<P>>) -> ShadowRouter<P> {
+        ShadowRouter {
+            processor,
+            default_pool,
+            shadow_pool,
+        }
+    }
 }
 
-impl<P> Router<P> for FixedRouter<P>
+impl<P> Router<P> for ShadowRouter<P>
 where
     P: Processor + Clone + Send + 'static,
-    P::Message: Message + Send,
+    P::Message: Message + Clone + Send,
 {
     fn route(&self, req: Vec<QueuedMessage<P::Message>>) -> Result<(), RouterError> {
-        let mut batches: HashMap<usize, Vec<QueuedMessage<P::Message>>> = HashMap::default();
+        let mut default_batches: HashMap<usize, Vec<QueuedMessage<P::Message>>> = HashMap::default();
+        let mut shadow_batches: HashMap<usize, Vec<QueuedMessage<P::Message>>> = HashMap::default();
 
         // Split all the messages out into backend/associated-keys groupings.
         for msg in req {
-            let backend_idx = {
+            let shadow_msg = msg.as_read();
+
+            let default_bidx = {
                 let msg_key = msg.key();
-                self.pool.get_backend_index(msg_key)
+                self.default_pool.get_backend_index(msg_key)
             };
 
-            let batch = batches.entry(backend_idx).or_insert_with(Vec::new);
-            batch.push(msg);
+            let shadow_bidx = {
+                let msg_key = msg.key();
+                self.shadow_pool.get_backend_index(msg_key)
+            };
+
+            let default_batch = default_batches.entry(default_bidx).or_insert_with(Vec::new);
+            default_batch.push(msg);
+
+            let shadow_batch = shadow_batches.entry(shadow_bidx).or_insert_with(Vec::new);
+            shadow_batch.push(shadow_msg);
         }
 
         // At this point, we've batched up all messages according to which backend they should go.
         // Now we need to actually submit these batches to their respective backends, and we're
         // done! The backends will respond to the client's message queue as results come back.
-        for (backend_idx, batch) in batches {
-            let backend = self.pool.get_backend_by_index(backend_idx);
+        for (backend_idx, batch) in default_batches {
+            let backend = self.default_pool.get_backend_by_index(backend_idx);
+            backend.submit(batch);
+        }
+
+        for (backend_idx, batch) in shadow_batches {
+            let backend = self.shadow_pool.get_backend_by_index(backend_idx);
             backend.submit(batch);
         }
 

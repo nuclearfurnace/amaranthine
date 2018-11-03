@@ -17,7 +17,7 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::processor::{ProcessorError, RequestProcessor};
+use backend::processor::{Processor, ProcessorError};
 use bytes::BytesMut;
 use common::Message;
 use futures::{
@@ -93,7 +93,7 @@ pub struct QueuedMessage<M> {
     msg: Option<M>,
     slot: usize,
     completed: bool,
-    response_tx: UnboundedSender<(usize, MessageResponse<M>)>,
+    response_tx: Option<UnboundedSender<(usize, MessageResponse<M>)>>,
 }
 
 impl<M> Message for QueuedMessage<M>
@@ -107,13 +107,16 @@ where
     fn into_buf(mut self) -> BytesMut { self.msg.take().unwrap().into_buf() }
 }
 
-impl<M> QueuedMessage<M> {
+impl<M> QueuedMessage<M>
+where
+    M: Clone,
+{
     pub fn new(msg: M, slot: usize, response_tx: UnboundedSender<(usize, MessageResponse<M>)>) -> QueuedMessage<M> {
         QueuedMessage {
             msg: Some(msg),
             slot,
             completed: false,
-            response_tx,
+            response_tx: Some(response_tx),
         }
     }
 
@@ -122,10 +125,29 @@ impl<M> QueuedMessage<M> {
 
     /// Sends back a message to the queue to the assigned slot.
     pub fn respond(&mut self, response: M) {
+        if self.completed {
+            return;
+        }
+
         let _ = self
             .response_tx
+            .take()
+            .unwrap()
             .unbounded_send((self.slot, MessageResponse::Complete(response)));
         self.completed = true;
+    }
+
+    /// Creates a new read-only version of this queued message.
+    ///
+    /// Useful for getting a copy of a given queued message where it's impossible to overwrite the
+    /// message slot pointed to by the original.
+    pub fn as_read(&self) -> QueuedMessage<M> {
+        QueuedMessage {
+            msg: self.msg.clone(),
+            slot: 0,
+            completed: true,
+            response_tx: None,
+        }
     }
 }
 
@@ -136,7 +158,11 @@ impl<M> Drop for QueuedMessage<M> {
         // default error message back to the client.  The message queue will ask the processor for
         // a protocol-specific error payload to send back when it reads a "failed" slot.
         if !self.completed {
-            let _ = self.response_tx.unbounded_send((self.slot, MessageResponse::Failed));
+            let _ = self
+                .response_tx
+                .take()
+                .unwrap()
+                .unbounded_send((self.slot, MessageResponse::Failed));
         }
     }
 }
@@ -159,7 +185,7 @@ enum QueueControlMessage<M> {
 /// the queue in order to hand back the response so it can be sent to the client.
 pub struct MessageQueue<P>
 where
-    P: RequestProcessor + Send + 'static,
+    P: Processor + Send + 'static,
 {
     input_closed: bool,
     output_closed: bool,
@@ -183,8 +209,8 @@ where
 
 impl<P> MessageQueue<P>
 where
-    P: RequestProcessor + Send + 'static,
-    P::Message: Message,
+    P: Processor + Send + 'static,
+    P::Message: Message + Clone,
 {
     pub fn new<T>(processor: P, tx: T) -> (MessageQueue<P>, MessageQueueControlPlane<P>)
     where
@@ -337,8 +363,8 @@ where
 
 impl<P> Future for MessageQueue<P>
 where
-    P: RequestProcessor + Send + 'static,
-    P::Message: Message,
+    P: Processor + Send + 'static,
+    P::Message: Message + Clone,
 {
     type Error = ();
     type Item = ();
@@ -475,7 +501,7 @@ where
 
 impl<P> Drop for MessageQueue<P>
 where
-    P: RequestProcessor + Send,
+    P: Processor + Send,
 {
     fn drop(&mut self) {
         trace!("[message queue] dropping");
@@ -487,14 +513,14 @@ where
 /// Allows operating with a message queue at runtime, once it has been spawned and no longer owned.
 pub struct MessageQueueControlPlane<P>
 where
-    P: RequestProcessor + Send + 'static,
+    P: Processor + Send + 'static,
 {
     control_tx: UnboundedSender<QueueControlMessage<P::Message>>,
 }
 
 impl<P> MessageQueueControlPlane<P>
 where
-    P: RequestProcessor + Send + 'static,
+    P: Processor + Send + 'static,
 {
     /// Queues a set of messages in this message queue, allocating a slot for a response for each
     /// message.  Queued messages have a reference back to this message queue in order to notify it.
@@ -510,7 +536,7 @@ where
 
 impl<P> Drop for MessageQueueControlPlane<P>
 where
-    P: RequestProcessor + Send + 'static,
+    P: Processor + Send + 'static,
 {
     fn drop(&mut self) {
         trace!("[message queue control plane] dropping");

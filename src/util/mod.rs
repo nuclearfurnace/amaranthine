@@ -22,6 +22,9 @@ use futures::{future::Future, stream::Stream};
 mod batch;
 pub use self::batch::Batch;
 
+mod helpers;
+pub use self::helpers::ProcessFuture;
+
 mod work_queue;
 pub use self::work_queue::{WorkQueue, Worker};
 

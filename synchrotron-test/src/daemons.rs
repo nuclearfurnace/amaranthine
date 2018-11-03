@@ -10,17 +10,17 @@ use std::time::Duration;
 
 static PORT_OFFSET: AtomicUsize = ATOMIC_USIZE_INIT;
 
-macro_rules! get_redis_config {
-    ($($arg:tt)*) => (format!(r#"
+fn get_redis_config(stats_port: u16, listen1_port: u16, listen2_port: u16, redis1_port: u16, redis2_port: u16) -> String {
+    format!(r#"
         {{
-            "stats_port": {},
+            "stats_port": {stats_port},
             "listeners": [
                 {{
                     "protocol": "redis",
-                    "address": "127.0.0.1:{}",
+                    "address": "127.0.0.1:{listen1_port}",
                     "pools": {{
                         "default": {{
-                            "addresses": ["127.0.0.1:{}", "127.0.0.1:{}"],
+                            "addresses": ["127.0.0.1:{redis1_port}", "127.0.0.1:{redis2_port}"],
                             "options": {{
                                 "cooloff_timeout_ms": "2000",
                                 "timeout_ms": "100"
@@ -30,23 +30,38 @@ macro_rules! get_redis_config {
                     "routing": {{
                         "type": "fixed"
                     }}
+                }},
+                {{
+                    "protocol": "redis",
+                    "address": "127.0.0.1:{listen2_port}",
+                    "pools": {{
+                        "default": {{
+                            "addresses": ["127.0.0.1:{redis1_port}"]
+                        }},
+                        "shadow": {{
+                            "addresses": ["127.0.0.1:{redis2_port}"]
+                        }}
+                    }},
+                    "routing": {{
+                        "type": "shadow"
+                    }}
                 }}
             ]
         }}
-    "#, $($arg)*));
-
+    "#, stats_port = stats_port, listen1_port = listen1_port, listen2_port = listen2_port, redis1_port = redis1_port, redis2_port = redis2_port)
 }
 
 pub struct SynchrotronRunner {
     handle: Child,
     port: u16,
-    conn_str: String,
+    fixed_conn_str: String,
+    shadow_conn_str: String,
     conf_dir: Option<TempDir>,
 }
 
 impl SynchrotronRunner {
-    pub fn new_redis(listen_port: u16, stats_port: u16, redis1_port: u16, redis2_port: u16) -> Result<SynchrotronRunner, Error> {
-        let full_config = get_redis_config!(stats_port, listen_port, redis1_port, redis2_port);
+    pub fn new_redis(stats_port: u16, listen1_port: u16, listen2_port: u16, redis1_port: u16, redis2_port: u16) -> Result<SynchrotronRunner, Error> {
+        let full_config = get_redis_config(stats_port, listen1_port, listen2_port, redis1_port, redis2_port);
 
         // Create our configuration file from the data we got.
         let conf_dir = Builder::new()
@@ -65,18 +80,24 @@ impl SynchrotronRunner {
             .stderr(Stdio::null())
             .spawn()?;
 
-        wait_until(|| check_synchrotron(listen_port));
+        wait_until(|| check_synchrotron(listen1_port));
+        wait_until(|| check_synchrotron(listen2_port));
 
         Ok(SynchrotronRunner {
             handle: handle,
-            port: listen_port,
-            conn_str: format!("redis://127.0.0.1:{}", listen_port),
+            port: listen1_port,
+            fixed_conn_str: format!("redis://127.0.0.1:{}", listen1_port),
+            shadow_conn_str: format!("redis://127.0.0.1:{}", listen2_port),
             conf_dir: Some(conf_dir),
         })
     }
 
-    pub fn get_conn_str(&self) -> &str {
-        self.conn_str.as_str()
+    pub fn get_fixed_conn_str(&self) -> &str {
+        self.fixed_conn_str.as_str()
+    }
+
+    pub fn get_shadow_conn_str(&self) -> &str {
+        self.shadow_conn_str.as_str()
     }
 }
 
@@ -205,14 +226,15 @@ fn check_synchrotron(port: u16) -> bool {
 pub fn get_redis_daemons() -> (SynchrotronRunner, RedisRunner, RedisRunner) {
     let offset = PORT_OFFSET.fetch_add(1, Ordering::SeqCst) as u16;
 
-    let synchrotron_port = 43000 + offset;
-    let synchrotron_stats_port = 44000 + offset;
-    let redis1_port = 45000 + offset;
-    let redis2_port = 46000 + offset;
+    let synchrotron_stats_port = 43000 + offset;
+    let synchrotron_listen1_port = 44000 + offset;
+    let synchrotron_listen2_port = 45000 + offset;
+    let redis1_port = 46000 + offset;
+    let redis2_port = 47000 + offset;
 
     let redis1 = RedisRunner::new(redis1_port).unwrap();
     let redis2 = RedisRunner::new(redis2_port).unwrap();
-    let synchrotron = SynchrotronRunner::new_redis(synchrotron_port, synchrotron_stats_port, redis1_port, redis2_port).unwrap();
+    let synchrotron = SynchrotronRunner::new_redis(synchrotron_stats_port, synchrotron_listen1_port, synchrotron_listen2_port, redis1_port, redis2_port).unwrap();
 
     (synchrotron, redis1, redis2)
 }
