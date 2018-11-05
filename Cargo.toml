@@ -14,7 +14,7 @@ lto = true
 opt-level = 3
 
 [dependencies]
-lazy_static = "^1.0"
+lazy_static = "^1.2"
 log = "^0.4"
 slog-async = "^2.3"
 slog-scope = "^4.0"
