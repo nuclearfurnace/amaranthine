@@ -78,6 +78,9 @@ where
                 }
             }
 
+            // TODO: ask the queue for the next largest available buffer we can write,
+            // and figure oiut how to store it under the underlying sink isn't ready
+
             // See if we can extract a request batch from the transport.
             let batch = try_ready!(self.transport.poll().map_err(Error::from_stream_error));
             if let Some(batch) = batch {
