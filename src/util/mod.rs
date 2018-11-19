@@ -49,7 +49,7 @@ pub trait StreamExt: Stream {
     where
         Self: Sized,
     {
-        batch::new(self, capacity)
+        batch::Batch::new(self, capacity)
     }
 }
 

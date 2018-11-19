@@ -28,9 +28,8 @@ pub mod redis;
 
 pub use self::errors::BackendError;
 
-use backend::{
-    distributor::BackendDescriptor, health::BackendHealth, message_queue::QueuedMessage, processor::Processor,
-};
+use backend::{distributor::BackendDescriptor, health::BackendHealth, processor::Processor};
+use common::EnqueuedRequests;
 use errors::CreationError;
 use futures::{
     future::{ok, Either},
@@ -45,7 +44,7 @@ use tokio::{
 };
 use util::{ProcessFuture, WorkQueue, Worker};
 
-type BackendWorkQueue<T> = Worker<Vec<QueuedMessage<T>>>;
+type BackendWorkQueue<T> = Worker<EnqueuedRequests<T>>;
 type MaybeTimeout<F> = Either<NotTimeout<F>, Timeout<F>>;
 
 pub struct NotTimeout<F>
@@ -336,7 +335,7 @@ where
     P::Message: Send,
 {
     health: Arc<BackendHealth>,
-    work_queue: WorkQueue<Vec<QueuedMessage<P::Message>>>,
+    work_queue: WorkQueue<EnqueuedRequests<P::Message>>,
 }
 
 impl<P> Backend<P>
@@ -394,7 +393,7 @@ where
         Ok((backend, runner))
     }
 
-    pub fn submit(&self, batch: Vec<QueuedMessage<P::Message>>) { self.work_queue.send(batch) }
+    pub fn submit(&self, batch: EnqueuedRequests<P::Message>) { self.work_queue.send(batch) }
 
     pub fn is_healthy(&self) -> bool { self.health.is_healthy() }
 

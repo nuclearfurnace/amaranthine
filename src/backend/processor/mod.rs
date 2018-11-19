@@ -20,11 +20,12 @@
 mod errors;
 pub use self::errors::ProcessorError;
 
-use backend::message_queue::{MessageState, QueuedMessage};
+use backend::message_queue::MessageState;
+use common::EnqueuedRequests;
 use futures::future::{Either, FutureResult};
 use protocol::errors::ProtocolError;
 use std::{error::Error, net::SocketAddr};
-use tokio::{io::ReadHalf, net::tcp::TcpStream};
+use tokio::net::tcp::TcpStream;
 use util::ProcessFuture;
 
 /// An existing or pending TcpStream.
@@ -33,7 +34,7 @@ pub type TcpStreamFuture = Either<FutureResult<TcpStream, ProtocolError>, Proces
 /// Cache-specific logic for processing requests and interacting with backends.
 pub trait Processor {
     type Message;
-    type ClientReader;
+    type Transport;
 
     /// Fragments a client's requests into, potentially, multiple subrequests.
     ///
@@ -53,8 +54,10 @@ pub trait Processor {
     /// Converts the given error string into a corresponding format the can be sent to the client.
     fn get_error_message_str(&self, &str) -> Self::Message;
 
-    /// Converts the given `ReadHalf` into a stream that will read requests of type `Message`.
-    fn get_read_stream(&self, ReadHalf<TcpStream>) -> Self::ClientReader;
+    /// Wraps the given TCP stream with a protocol-specific transport layer, allowing the caller to
+    /// extract protocol-specific messages, as well as send them, via the `Stream` and `Sink`
+    /// implementations.
+    fn get_transport(&self, TcpStream) -> Self::Transport;
 
     /// Connects to the given address via TCP and performs any necessary processor-specific
     /// initialization.
@@ -62,11 +65,11 @@ pub trait Processor {
 
     /// Processes a batch of requests, running the necessary operations against the given TCP
     /// stream.
-    fn process(&self, Vec<QueuedMessage<Self::Message>>, TcpStreamFuture) -> ProcessFuture;
+    fn process(&self, EnqueuedRequests<Self::Message>, TcpStreamFuture) -> ProcessFuture;
 
     /// Processes a batch of requests, running the necessary operations against the given TCP
     /// stream, without waiting for a response.
     ///
     /// This is useful for traffic shadowing, etc.
-    fn process_noreply(&self, Vec<QueuedMessage<Self::Message>>, TcpStreamFuture) -> ProcessFuture;
+    fn process_noreply(&self, EnqueuedRequests<Self::Message>, TcpStreamFuture) -> ProcessFuture;
 }

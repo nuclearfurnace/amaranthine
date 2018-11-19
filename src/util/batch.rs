@@ -17,10 +17,7 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use futures::{
-    stream::{Fuse, Stream},
-    Async, Poll,
-};
+use futures::{prelude::*, stream::Fuse};
 use std::mem;
 
 /// An adapter for batching up items in a stream opportunistically.
@@ -42,20 +39,20 @@ where
     stream: Fuse<S>,
 }
 
-pub fn new<S>(s: S, capacity: usize) -> Batch<S>
+impl<S> Batch<S>
 where
     S: Stream,
 {
-    assert!(capacity > 0);
+    pub fn new(s: S, capacity: usize) -> Batch<S> {
+        assert!(capacity > 0);
 
-    Batch {
-        items: Vec::with_capacity(capacity),
-        err: None,
-        stream: s.fuse(),
+        Batch {
+            items: Vec::with_capacity(capacity),
+            err: None,
+            stream: s.fuse(),
+        }
     }
-}
 
-impl<S: Stream> Batch<S> {
     fn take(&mut self) -> Vec<S::Item> {
         let cap = self.items.capacity();
         mem::replace(&mut self.items, Vec::with_capacity(cap))
@@ -124,4 +121,18 @@ where
             }
         }
     }
+}
+
+impl<S> Sink for Batch<S>
+where
+    S: Sink + Stream,
+{
+    type SinkError = S::SinkError;
+    type SinkItem = S::SinkItem;
+
+    fn start_send(&mut self, item: S::SinkItem) -> StartSend<S::SinkItem, S::SinkError> { self.stream.start_send(item) }
+
+    fn poll_complete(&mut self) -> Poll<(), S::SinkError> { self.stream.poll_complete() }
+
+    fn close(&mut self) -> Poll<(), S::SinkError> { self.stream.close() }
 }

@@ -93,6 +93,7 @@ mod listener;
 mod metrics;
 mod protocol;
 mod routing;
+mod service;
 mod util;
 
 use conf::{Configuration, LevelExt};

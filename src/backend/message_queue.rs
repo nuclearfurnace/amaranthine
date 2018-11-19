@@ -19,8 +19,7 @@
 // SOFTWARE.
 use backend::processor::{Processor, ProcessorError};
 use bytes::BytesMut;
-use common::Message;
-use futures::prelude::*;
+use common::{AssignedRequests, AssignedResponse, Message, MessageResponse};
 use slab::Slab;
 use std::collections::VecDeque;
 
@@ -62,27 +61,10 @@ pub enum MessageState {
     StreamingFragmented(Option<BytesMut>),
 }
 
-/// Message response types for a queued message.
-#[derive(Debug)]
-pub enum MessageResponse<M> {
-    /// The message ultimately "failed".  This happens if a queued message is dropped before having
-    /// a response sent for it, which may happen if an error occurs during the backend read, etc.
-    Failed,
-
-    /// The message was processored correctly and a response was submitted to the message queue.
-    Complete(M),
-}
-
-pub type AssignedBatch<T> = Vec<(usize, T)>;
-pub type FulfilledBatch<T> = Vec<(usize, MessageResponse<T>)>;
-
 pub struct MessageQueue<P>
 where
     P: Processor,
 {
-    input_closed: bool,
-    output_closed: bool,
-
     // Processor that provides fragmentation capabilities.
     processor: P,
 
@@ -98,11 +80,7 @@ where
 {
     pub fn new(processor: P) -> MessageQueue<P> {
         MessageQueue {
-            input_closed: false,
-            output_closed: false,
-
             processor,
-
             slot_order: VecDeque::new(),
             slots: Slab::new(),
         }
@@ -120,10 +98,10 @@ where
         }
     }
 
-    fn get_next_response(&mut self) -> Poll<Option<BytesMut>, ProcessorError> {
+    fn get_next_response(&mut self) -> Result<Option<BytesMut>, ProcessorError> {
         // See if the next slot is even ready yet.  If it's not, then we can't do anything.
         if !self.is_slot_ready(0) {
-            return Ok(Async::NotReady);
+            return Ok(None);
         }
 
         // If we have an immediately available response aka a standalone message or streaming
@@ -163,7 +141,7 @@ where
                 _ => unreachable!(),
             };
 
-            return Ok(Async::Ready(Some(buf)));
+            return Ok(Some(buf));
         }
 
         // Now we know that the next slot has been fulfilled, and that it's a fragmented message.
@@ -181,7 +159,7 @@ where
 
         for index in 0..fragment_count {
             if !self.is_slot_ready(index) {
-                return Ok(Async::NotReady);
+                return Ok(None);
             }
         }
 
@@ -194,13 +172,13 @@ where
         }
 
         let msg = self.processor.defragment_messages(fragments)?;
-        Ok(Async::Ready(Some(msg.into_buf())))
+        Ok(Some(msg.into_buf()))
     }
 
-    pub fn enqueue(&mut self, msgs: Vec<P::Message>) -> Result<AssignedBatch<P::Message>, ProcessorError> {
+    pub fn enqueue(&mut self, msgs: Vec<P::Message>) -> Result<AssignedRequests<P::Message>, ProcessorError> {
         let fmsgs = self.processor.fragment_messages(msgs)?;
 
-        let mut qmsgs = Vec::new();
+        let mut amsgs = Vec::new();
         for (msg_state, msg) in fmsgs {
             if msg_state == MessageState::Inline {
                 let slot_id = self.slots.insert(Some(msg));
@@ -208,16 +186,19 @@ where
             } else {
                 let slot_id = self.slots.insert(None);
                 self.slot_order.push_back((slot_id, msg_state));
-                qmsgs.push((slot_id, msg));
+                amsgs.push((slot_id, msg));
             }
         }
 
-        Ok(qmsgs)
+        Ok(amsgs)
     }
 
-    pub fn fulfill(&mut self, batch: FulfilledBatch<P::Message>) -> Result<(), ()> {
-        for (slot, response) in batch {
-            let slot = self.slots.get_mut(slot).ok_or_else(|| ())?;
+    pub fn fulfill<I>(&mut self, batch: I)
+    where
+        I: IntoIterator<Item = AssignedResponse<P::Message>>,
+    {
+        for (slot, response) in batch.into_iter() {
+            let slot = self.slots.get_mut(slot);
             match response {
                 MessageResponse::Complete(msg) => {
                     slot.replace(msg);
@@ -228,25 +209,24 @@ where
                 },
             }
         }
-        Ok(())
     }
 
-    pub fn get_sendable_bufs(&mut self) -> Option<Vec<BytesMut>> {
+    pub fn get_sendable_buf(&mut self) -> Option<BytesMut> {
         if !self.is_slot_ready(0) {
-            return None
+            return None;
         }
 
-        let mut bufs = Vec::new();
+        let mut mbuf = BytesMut::new();
         loop {
             let resp = self.get_next_response();
             match resp {
-                Ok(Async::Ready(Some(buf))) => {
-                    bufs.push(buf);
+                Ok(Some(buf)) => {
+                    mbuf.unsplit(buf);
                 },
                 _ => break,
             }
         }
 
-        Some(bufs)
+        Some(mbuf)
     }
 }

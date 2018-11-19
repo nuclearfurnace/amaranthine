@@ -17,16 +17,16 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::message_queue::QueuedMessage;
 use btoi::btoi;
 use bytes::{BufMut, BytesMut};
-use common::Message;
+use common::{EnqueuedRequests, Message};
 use futures::prelude::*;
 use itoa;
 use metrics::{self, MetricSink, Metrics};
 use protocol::errors::ProtocolError;
-use std::error::Error;
-use tokio::io::{write_all, AsyncRead, AsyncWrite};
+use tokio::io::{write_all, AsyncRead, AsyncWrite, Error, ErrorKind};
+
+const MAX_OUTSTANDING_WBUF: usize = 8192;
 
 const REDIS_COMMAND_ERROR: u8 = b'-';
 const REDIS_COMMAND_STATUS: u8 = b'+';
@@ -43,26 +43,27 @@ const REDIS_INT_BUF: [u8; 1] = [REDIS_COMMAND_INTEGER];
 const REDIS_CRLF: [u8; 2] = [b'\r', b'\n'];
 const REDIS_BACKEND_CLOSED: &str = "backend closed prematurely";
 
-/// An unbounded stream of Redis messages pulled from an asynchronous reader.
-pub struct RedisMessageStream<R>
+/// A Redis-specific transport.
+pub struct RedisTransport<T>
 where
-    R: AsyncRead,
+    T: AsyncRead + AsyncWrite,
 {
-    rx: R,
-    rd: BytesMut,
+    transport: T,
+    rbuf: BytesMut,
+    wbuf: BytesMut,
     metrics: MetricSink,
     closed: bool,
 }
 
-pub struct RedisMultipleMessages<R>
+pub struct RedisMultipleMessages<T>
 where
-    R: AsyncRead,
+    T: AsyncRead,
 {
-    rx: Option<R>,
-    rd: BytesMut,
+    transport: Option<T>,
+    rbuf: BytesMut,
     metrics: MetricSink,
     bytes_read: usize,
-    msgs: Vec<QueuedMessage<RedisMessage>>,
+    msgs: EnqueuedRequests<RedisMessage>,
 }
 
 /// A RESP-based client/server message for Redis.
@@ -136,7 +137,7 @@ impl RedisMessage {
         RedisMessage::Status(rd, 1)
     }
 
-    pub fn from_error(e: Box<Error>) -> RedisMessage {
+    pub fn from_error(e: Box<std::error::Error>) -> RedisMessage {
         let error_str = e.description();
         let bytes = error_str.as_bytes();
 
@@ -234,14 +235,15 @@ impl Message for RedisMessage {
     fn into_buf(self) -> BytesMut { self.into_resp() }
 }
 
-impl<R> RedisMessageStream<R>
+impl<T> RedisTransport<T>
 where
-    R: AsyncRead,
+    T: AsyncRead + AsyncWrite,
 {
-    pub fn new(rx: R) -> Self {
-        RedisMessageStream {
-            rx,
-            rd: BytesMut::new(),
+    pub fn new(transport: T) -> Self {
+        RedisTransport {
+            transport,
+            rbuf: BytesMut::new(),
+            wbuf: BytesMut::new(),
             metrics: metrics::get_sink(),
             closed: false,
         }
@@ -249,9 +251,9 @@ where
 
     fn fill_read_buf(&mut self) -> Poll<(), ProtocolError> {
         loop {
-            self.rd.reserve(16384);
+            self.rbuf.reserve(8192);
 
-            let n = try_ready!(self.rx.read_buf(&mut self.rd));
+            let n = try_ready!(self.transport.read_buf(&mut self.rbuf));
             if n == 0 {
                 return Ok(Async::Ready(()));
             }
@@ -259,9 +261,9 @@ where
     }
 }
 
-impl<R> Stream for RedisMessageStream<R>
+impl<T> Stream for RedisTransport<T>
 where
-    R: AsyncRead,
+    T: AsyncRead + AsyncWrite,
 {
     type Error = ProtocolError;
     type Item = RedisMessage;
@@ -273,7 +275,7 @@ where
 
         let socket_closed = self.fill_read_buf()?.is_ready();
 
-        match read_message(&mut self.rd) {
+        match read_message(&mut self.rbuf) {
             Ok(Async::Ready((bytes_read, cmd))) => {
                 trace!("[protocol] got message from client! ({} bytes)", bytes_read);
                 self.metrics
@@ -302,14 +304,49 @@ where
     }
 }
 
-impl<R> RedisMultipleMessages<R>
+impl<T> Sink for RedisTransport<T>
 where
-    R: AsyncRead,
+    T: AsyncRead + AsyncWrite,
 {
-    pub fn new(rx: R, msgs: Vec<QueuedMessage<RedisMessage>>) -> Self {
+    type SinkError = Error;
+    type SinkItem = BytesMut;
+
+    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
+        if self.wbuf.len() >= MAX_OUTSTANDING_WBUF {
+            self.poll_complete()?;
+
+            if self.wbuf.len() >= MAX_OUTSTANDING_WBUF {
+                return Ok(AsyncSink::NotReady(item));
+            }
+        }
+
+        self.wbuf.unsplit(item);
+        Ok(AsyncSink::Ready)
+    }
+
+    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        while !self.wbuf.is_empty() {
+            let n = try_ready!(self.transport.poll_write(&self.wbuf));
+            if n == 0 {
+                return Err(ErrorKind::WriteZero.into());
+            }
+            let _ = self.wbuf.split_to(n);
+        }
+
+        try_ready!(self.transport.poll_flush());
+
+        return Ok(Async::Ready(()));
+    }
+}
+
+impl<T> RedisMultipleMessages<T>
+where
+    T: AsyncRead,
+{
+    pub fn new(transport: T, msgs: EnqueuedRequests<RedisMessage>) -> Self {
         RedisMultipleMessages {
-            rx: Some(rx),
-            rd: BytesMut::new(),
+            transport: Some(transport),
+            rbuf: BytesMut::new(),
             metrics: metrics::get_sink(),
             bytes_read: 0,
             msgs,
@@ -318,9 +355,9 @@ where
 
     fn fill_read_buf(&mut self) -> Poll<(), ProtocolError> {
         loop {
-            self.rd.reserve(16384);
+            self.rbuf.reserve(16384);
 
-            let n = try_ready!(self.rx.as_mut().unwrap().read_buf(&mut self.rd));
+            let n = try_ready!(self.transport.as_mut().unwrap().read_buf(&mut self.rbuf));
             self.bytes_read += n;
 
             if n == 0 {
@@ -330,12 +367,12 @@ where
     }
 }
 
-impl<R> Future for RedisMultipleMessages<R>
+impl<T> Future for RedisMultipleMessages<T>
 where
-    R: AsyncRead,
+    T: AsyncRead,
 {
     type Error = ProtocolError;
-    type Item = (R, usize);
+    type Item = (T, usize);
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         let socket_closed = self.fill_read_buf()?.is_ready();
@@ -343,10 +380,10 @@ where
         loop {
             // We've collected all the messages, time to return.
             if self.msgs.is_empty() {
-                return Ok(Async::Ready((self.rx.take().unwrap(), self.bytes_read)));
+                return Ok(Async::Ready((self.transport.take().unwrap(), self.bytes_read)));
             }
 
-            let result = read_message(&mut self.rd);
+            let result = read_message(&mut self.rbuf);
             match result {
                 Ok(Async::Ready((bytes_read, msg))) => {
                     trace!("[protocol] got message from server! ({} bytes)", bytes_read);
@@ -354,7 +391,7 @@ where
                         .update_count(Metrics::ServerBytesReceived, bytes_read as i64);
 
                     let mut qmsg = self.msgs.remove(0);
-                    qmsg.respond(msg);
+                    qmsg.fulfill(msg);
                 },
                 Err(e) => return Err(e),
                 _ => {
@@ -363,7 +400,7 @@ where
                         // the client with errors.
                         let err = RedisMessage::from_error_str(REDIS_BACKEND_CLOSED);
                         while let Some(mut qmsg) = self.msgs.pop() {
-                            qmsg.respond(err.clone())
+                            qmsg.fulfill(err.clone())
                         }
 
                         Err(ProtocolError::BackendClosedPrematurely)
@@ -376,16 +413,16 @@ where
     }
 }
 
-pub fn read_messages_stream<R>(rx: R) -> RedisMessageStream<R>
+pub fn get_transport<T>(inner: T) -> RedisTransport<T>
 where
-    R: AsyncRead,
+    T: AsyncRead + AsyncWrite,
 {
-    RedisMessageStream::new(rx)
+    RedisTransport::new(inner)
 }
 
-pub fn read_messages<R>(rx: R, msgs: Vec<QueuedMessage<RedisMessage>>) -> RedisMultipleMessages<R>
+pub fn read_messages<T>(rx: T, msgs: EnqueuedRequests<RedisMessage>) -> RedisMultipleMessages<T>
 where
-    R: AsyncRead,
+    T: AsyncRead,
 {
     RedisMultipleMessages::new(rx, msgs)
 }
@@ -599,8 +636,8 @@ where
 }
 
 pub fn write_messages<T>(
-    tx: T, mut msgs: Vec<QueuedMessage<RedisMessage>>,
-) -> impl Future<Item = (T, Vec<QueuedMessage<RedisMessage>>, usize), Error = ProtocolError>
+    transport: T, mut msgs: EnqueuedRequests<RedisMessage>,
+) -> impl Future<Item = (T, EnqueuedRequests<RedisMessage>, usize), Error = ProtocolError>
 where
     T: AsyncWrite,
 {
@@ -608,12 +645,12 @@ where
     let buf = match msgs_len {
         1 => {
             let msg = &mut msgs[0];
-            msg.consume_inner().unwrap().into_resp()
+            msg.consume().into_resp()
         },
         _ => {
             let mut buf = BytesMut::new();
             for msg in &mut msgs {
-                let msg_buf = msg.consume_inner().unwrap().into_resp();
+                let msg_buf = msg.consume().into_resp();
                 buf.extend_from_slice(&msg_buf[..]);
             }
             buf
@@ -621,8 +658,8 @@ where
     };
 
     let buf_len = buf.len();
-    write_all(tx, buf)
-        .map(move |(tx, _buf)| (tx, msgs, buf_len))
+    write_all(transport, buf)
+        .map(move |(transport, _buf)| (transport, msgs, buf_len))
         .map_err(|e| e.into())
 }
 

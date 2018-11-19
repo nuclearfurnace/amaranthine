@@ -18,23 +18,22 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 use backend::{
-    message_queue::{MessageState, QueuedMessage},
+    message_queue::MessageState,
     processor::{Processor, ProcessorError, TcpStreamFuture},
 };
 use bytes::BytesMut;
-use common::Message;
+use common::{EnqueuedRequests, Message};
 use futures::{
     future::{ok, Either},
     prelude::*,
 };
 use itoa;
 use protocol::{
-    self,
     errors::ProtocolError,
-    redis::{self, RedisMessage, RedisMessageStream},
+    redis::{self, RedisMessage, RedisTransport},
 };
 use std::{borrow::Borrow, error::Error, net::SocketAddr};
-use tokio::{io::ReadHalf, net::TcpStream};
+use tokio::net::TcpStream;
 use util::ProcessFuture;
 
 const REDIS_DEL: &[u8] = b"del";
@@ -48,8 +47,8 @@ impl RedisProcessor {
 }
 
 impl Processor for RedisProcessor {
-    type ClientReader = RedisMessageStream<ReadHalf<TcpStream>>;
     type Message = RedisMessage;
+    type Transport = RedisTransport<TcpStream>;
 
     fn fragment_messages(
         &self, msgs: Vec<Self::Message>,
@@ -65,9 +64,7 @@ impl Processor for RedisProcessor {
 
     fn get_error_message_str(&self, e: &str) -> Self::Message { RedisMessage::from_error_str(e) }
 
-    fn get_read_stream(&self, client_rx: ReadHalf<TcpStream>) -> Self::ClientReader {
-        protocol::redis::read_messages_stream(client_rx)
-    }
+    fn get_transport(&self, client: TcpStream) -> Self::Transport { RedisTransport::new(client) }
 
     fn preconnect(&self, addr: &SocketAddr, noreply: bool) -> ProcessFuture {
         let inner = TcpStream::connect(addr)
@@ -83,7 +80,7 @@ impl Processor for RedisProcessor {
         ProcessFuture::new(inner)
     }
 
-    fn process(&self, req: Vec<QueuedMessage<Self::Message>>, stream: TcpStreamFuture) -> ProcessFuture {
+    fn process(&self, req: EnqueuedRequests<Self::Message>, stream: TcpStreamFuture) -> ProcessFuture {
         let inner = stream
             .and_then(move |server| redis::write_messages(server, req))
             .and_then(move |(server, msgs, _n)| redis::read_messages(server, msgs))
@@ -91,7 +88,7 @@ impl Processor for RedisProcessor {
         ProcessFuture::new(inner)
     }
 
-    fn process_noreply(&self, req: Vec<QueuedMessage<Self::Message>>, stream: TcpStreamFuture) -> ProcessFuture {
+    fn process_noreply(&self, req: EnqueuedRequests<Self::Message>, stream: TcpStreamFuture) -> ProcessFuture {
         let inner = stream
             .and_then(move |server| redis::write_messages(server, req))
             .and_then(move |(server, _msgs, _n)| ok(server));

@@ -17,8 +17,8 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::{message_queue::MessageQueue, pool::BackendPoolBuilder, processor::Processor, redis::RedisProcessor};
-use common::Message;
+use backend::{pool::BackendPoolBuilder, processor::Processor, redis::RedisProcessor};
+use common::{AssignedRequests, Message};
 use conf::ListenerConfiguration;
 use errors::CreationError;
 use futures::{
@@ -28,16 +28,12 @@ use futures::{
 use futures_turnstyle::Waiter;
 use metrics::{self, Metrics};
 use net2::TcpBuilder;
-use protocol::errors::ProtocolError;
-use routing::{FixedRouter, Router, ShadowRouter};
-use std::{collections::HashMap, net::SocketAddr, time::Instant};
-use tokio::{
-    io::{self, AsyncRead},
-    net::TcpListener,
-    reactor,
-};
+use routing::{FixedRouter, ShadowRouter};
+use service::{DirectService, Pipeline};
+use std::{collections::HashMap, net::SocketAddr};
+use tokio::{io, net::TcpListener, reactor};
 use tokio_evacuate::{Evacuate, Warden};
-use util::{typeless, StreamExt};
+use util::typeless;
 
 type GenericRuntimeFuture = Box<Future<Item = (), Error = ()> + Send + 'static>;
 
@@ -81,7 +77,6 @@ fn routing_from_config<P, C>(
 where
     P: Processor + Clone + Send + 'static,
     P::Message: Message + Clone + Send + 'static,
-    P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
     C: Future + Clone + Send + 'static,
 {
     let reload_timeout_ms = config.reload_timeout_ms.unwrap_or_else(|| 5000);
@@ -123,7 +118,7 @@ fn get_fixed_router<P, C>(
 where
     P: Processor + Clone + Send + 'static,
     P::Message: Message + Clone + Send + 'static,
-    P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
+    P::Transport: Stream + Sink,
     C: Future + Clone + Send + 'static,
 {
     // Construct an instance of our router.
@@ -142,7 +137,7 @@ fn get_shadow_router<P, C>(
 where
     P: Processor + Clone + Send + 'static,
     P::Message: Message + Clone + Send + 'static,
-    P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
+    P::Transport: Stream + Sink,
     C: Future + Clone + Send + 'static,
 {
     // Construct an instance of our router.
@@ -168,8 +163,8 @@ fn build_router_chain<P, R, C>(
 where
     P: Processor + Clone + Send + 'static,
     P::Message: Message + Clone + Send + 'static,
-    P::ClientReader: Stream<Item = P::Message, Error = ProtocolError> + Send + 'static,
-    R: Router<P> + Clone + Send + 'static,
+    P::Transport: Stream + Sink,
+    R: DirectService<AssignedRequests<P::Message>> + Clone + Send + 'static,
     C: Future + Clone + Send + 'static,
 {
     let close2 = close.clone();
@@ -188,34 +183,8 @@ where
             let warden2 = warden.clone();
             let client_addr = client.peer_addr().unwrap();
 
-            // Spin up our protocol read stream and our outbound message queue.
-            let (client_rx, client_tx) = client.split();
-            let proto_rx = processor.get_read_stream(client_rx);
-            let (mq, mqcp) = MessageQueue::new(processor, client_tx);
-            tokio::spawn(mq);
-
-            // Run the client.
-            let client_proto = proto_rx
-                .batch(128)
-                .fold((router, mqcp, metrics), |(router, mut mqcp, mut metrics), req| {
-                    metrics.update_count(Metrics::ServerMessagesReceived, req.len() as i64);
-
-                    let batch_start = Instant::now();
-                    mqcp.enqueue(req)
-                        .and_then(move |qmsgs| {
-                            router
-                                .route(qmsgs)
-                                .map(|_| router)
-                                .map_err(|e| error!("[client] error during routing: {}", e))
-                        })
-                        .map(move |router| {
-                            let batch_end = Instant::now();
-                            metrics.update_latency(Metrics::ClientMessageBatchServiced, batch_start, batch_end);
-
-                            (router, mqcp, metrics)
-                        })
-                        .map_err(|_| ProtocolError::Empty)
-                })
+            let transport = processor.get_transport(client);
+            let runner = Pipeline::new(transport, router, processor)
                 .then(move |result| {
                     match result {
                         Ok((_, _, mut metrics)) => {
@@ -243,7 +212,7 @@ where
                 })
                 .select2(close);
 
-            tokio::spawn(typeless(client_proto));
+            tokio::spawn(typeless(runner));
 
             ok(())
         })

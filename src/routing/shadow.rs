@@ -17,9 +17,14 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::{message_queue::QueuedMessage, pool::BackendPool, processor::Processor};
-use common::Message;
-use routing::{Router, RouterError};
+use backend::{pool::BackendPool, processor::Processor};
+use common::{AssignedRequests, AssignedResponses, EnqueuedRequest, Message, PendingResponse};
+use futures::{
+    future::{join_all, JoinAll},
+    prelude::*,
+};
+use routing::RouterError;
+use service::DirectService;
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone)]
@@ -38,43 +43,57 @@ where
     P: Processor + Clone + Send + 'static,
     P::Message: Message + Clone + Send,
 {
-    pub fn new(processor: P, default_pool: Arc<BackendPool<P>>, shadow_pool: Arc<BackendPool<P>>) -> ShadowRouter<P> {
+    pub fn new(processor: P, default: Arc<BackendPool<P>>, shadow: Arc<BackendPool<P>>) -> ShadowRouter<P> {
         ShadowRouter {
             processor,
-            default_pool,
-            shadow_pool,
+            default_pool: default,
+            shadow_pool: shadow,
         }
     }
 }
 
-impl<P> Router<P> for ShadowRouter<P>
+impl<P> DirectService<AssignedRequests<P::Message>> for ShadowRouter<P>
 where
     P: Processor + Clone + Send + 'static,
     P::Message: Message + Clone + Send,
 {
-    fn route(&self, req: Vec<QueuedMessage<P::Message>>) -> Result<(), RouterError> {
-        let mut default_batches: HashMap<usize, Vec<QueuedMessage<P::Message>>> = HashMap::default();
-        let mut shadow_batches: HashMap<usize, Vec<QueuedMessage<P::Message>>> = HashMap::default();
+    type Error = RouterError;
+    type Future = ShadowResponseFuture<P>;
+    type Response = AssignedResponses<P::Message>;
+
+    fn poll_ready(&mut self) -> Poll<(), Self::Error> { Ok(Async::Ready(())) }
+
+    fn poll_service(&mut self) -> Poll<(), Self::Error> { Ok(Async::Ready(())) }
+
+    fn poll_close(&mut self) -> Poll<(), Self::Error> { Ok(Async::Ready(())) }
+
+    fn call(&mut self, req: AssignedRequests<P::Message>) -> Self::Future {
+        let futs = Vec::new();
+        let mut default_batches = HashMap::new();
+        let mut shadow_batches = HashMap::new();
 
         // Split all the messages out into backend/associated-keys groupings.
-        for msg in req {
-            let shadow_msg = msg.as_read();
+        for (id, msg) in req {
+            let shadow_msg = msg.clone();
 
-            let default_bidx = {
+            let default_backend_idx = {
                 let msg_key = msg.key();
                 self.default_pool.get_backend_index(msg_key)
             };
 
-            let shadow_bidx = {
+            let shadow_backend_idx = {
                 let msg_key = msg.key();
-                self.shadow_pool.get_backend_index(msg_key)
+                self.default_pool.get_backend_index(msg_key)
             };
 
-            let default_batch = default_batches.entry(default_bidx).or_insert_with(Vec::new);
-            default_batch.push(msg);
+            let (rx, wrapped) = EnqueuedRequest::new(id, msg);
+            let default_batch = default_batches.entry(default_backend_idx).or_insert_with(Vec::new);
+            default_batch.push(wrapped);
+            futs.push(rx);
 
-            let shadow_batch = shadow_batches.entry(shadow_bidx).or_insert_with(Vec::new);
-            shadow_batch.push(shadow_msg);
+            let wrapped = EnqueuedRequest::with_noop(shadow_msg);
+            let shadow_batch = shadow_batches.entry(shadow_backend_idx).or_insert_with(Vec::new);
+            shadow_batch.push(wrapped);
         }
 
         // At this point, we've batched up all messages according to which backend they should go.
@@ -90,6 +109,38 @@ where
             backend.submit(batch);
         }
 
-        Ok(())
+        ShadowResponseFuture::new(futs)
+    }
+}
+
+pub struct ShadowResponseFuture<P>
+where
+    P: Processor,
+{
+    responses: JoinAll<Vec<PendingResponse<P::Message>>>,
+}
+
+impl<P> ShadowResponseFuture<P>
+where
+    P: Processor,
+{
+    fn new(responses: Vec<PendingResponse<P::Message>>) -> ShadowResponseFuture<P> {
+        ShadowResponseFuture {
+            responses: join_all(responses),
+        }
+    }
+}
+
+impl<P> Future for ShadowResponseFuture<P>
+where
+    P: Processor,
+{
+    type Error = RouterError;
+    type Item = AssignedResponses<P::Message>;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        self.responses
+            .poll()
+            .map_err(|e| RouterError::BadResponse("response receiver dropped!".to_owned()))
     }
 }

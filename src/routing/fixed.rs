@@ -17,9 +17,14 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::{message_queue::QueuedMessage, pool::BackendPool, processor::Processor};
-use common::Message;
-use routing::{Router, RouterError};
+use backend::{pool::BackendPool, processor::Processor};
+use common::{AssignedRequests, AssignedResponses, EnqueuedRequest, Message, PendingResponse};
+use futures::{
+    future::{join_all, JoinAll},
+    prelude::*,
+};
+use routing::RouterError;
+use service::DirectService;
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone)]
@@ -40,23 +45,36 @@ where
     pub fn new(processor: P, pool: Arc<BackendPool<P>>) -> FixedRouter<P> { FixedRouter { processor, pool } }
 }
 
-impl<P> Router<P> for FixedRouter<P>
+impl<P> DirectService<AssignedRequests<P::Message>> for FixedRouter<P>
 where
     P: Processor + Clone + Send + 'static,
     P::Message: Message + Send,
 {
-    fn route(&self, req: Vec<QueuedMessage<P::Message>>) -> Result<(), RouterError> {
-        let mut batches: HashMap<usize, Vec<QueuedMessage<P::Message>>> = HashMap::default();
+    type Error = RouterError;
+    type Future = FixedResponseFuture<P>;
+    type Response = AssignedResponses<P::Message>;
+
+    fn poll_ready(&mut self) -> Poll<(), Self::Error> { Ok(Async::Ready(())) }
+
+    fn poll_service(&mut self) -> Poll<(), Self::Error> { Ok(Async::Ready(())) }
+
+    fn poll_close(&mut self) -> Poll<(), Self::Error> { Ok(Async::Ready(())) }
+
+    fn call(&mut self, req: AssignedRequests<P::Message>) -> Self::Future {
+        let futs = Vec::new();
+        let mut batches = HashMap::new();
 
         // Split all the messages out into backend/associated-keys groupings.
-        for msg in req {
+        for (id, msg) in req {
             let backend_idx = {
                 let msg_key = msg.key();
                 self.pool.get_backend_index(msg_key)
             };
 
+            let (rx, wrapped) = EnqueuedRequest::new(id, msg);
             let batch = batches.entry(backend_idx).or_insert_with(Vec::new);
-            batch.push(msg);
+            batch.push(wrapped);
+            futs.push(rx);
         }
 
         // At this point, we've batched up all messages according to which backend they should go.
@@ -67,6 +85,38 @@ where
             backend.submit(batch);
         }
 
-        Ok(())
+        FixedResponseFuture::new(futs)
+    }
+}
+
+pub struct FixedResponseFuture<P>
+where
+    P: Processor,
+{
+    responses: JoinAll<Vec<PendingResponse<P::Message>>>,
+}
+
+impl<P> FixedResponseFuture<P>
+where
+    P: Processor,
+{
+    fn new(responses: Vec<PendingResponse<P::Message>>) -> FixedResponseFuture<P> {
+        FixedResponseFuture {
+            responses: join_all(responses),
+        }
+    }
+}
+
+impl<P> Future for FixedResponseFuture<P>
+where
+    P: Processor,
+{
+    type Error = RouterError;
+    type Item = AssignedResponses<P::Message>;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        self.responses
+            .poll()
+            .map_err(|e| RouterError::BadResponse("response receiver dropped!".to_owned()))
     }
 }

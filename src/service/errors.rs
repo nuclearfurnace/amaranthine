@@ -17,9 +17,41 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::{message_queue::QueuedMessage, processor::Processor};
-use routing::errors::RouterError;
+use backend::processor::ProcessorError;
+use futures::prelude::*;
+use service::DirectService;
 
-pub trait Router<P: Processor> {
-    fn route(&self, Vec<QueuedMessage<P::Message>>) -> Result<(), RouterError>;
+pub enum PipelineError<T, S, R>
+where
+    T: Sink + Stream,
+    S: DirectService<R>,
+{
+    /// The underlying transport failed to produce a request.
+    TransportReceive(<T as Stream>::Error),
+
+    /// The underlying transport failed while attempting to send a response.
+    TransportSend(<T as Sink>::SinkError),
+
+    /// The underlying service failed to process a request.
+    Service(S::Error),
+}
+
+impl<T, S, R> PipelineError<T, S, R>
+where
+    T: Sink + Stream,
+    S: DirectService<R>,
+{
+    pub fn from_sink_error(e: <T as Sink>::SinkError) -> Self { PipelineError::TransportSend(e) }
+
+    pub fn from_stream_error(e: <T as Stream>::Error) -> Self { PipelineError::TransportReceive(e) }
+
+    pub fn from_service_error(e: <S as DirectService<R>>::Error) -> Self { PipelineError::Service(e) }
+}
+
+impl<T, S, R> From<ProcessorError> for PipelineError<T, S, R>
+where
+    T: Sink + Stream,
+    S: DirectService<R>,
+{
+    fn from(e: ProcessorError) -> PipelineError<T, S, R> { e.into() }
 }
