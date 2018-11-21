@@ -22,7 +22,6 @@ use bytes::{BufMut, BytesMut};
 use common::{EnqueuedRequests, Message};
 use futures::prelude::*;
 use itoa;
-use metrics::{self, MetricSink, Metrics};
 use protocol::errors::ProtocolError;
 use tokio::io::{write_all, AsyncRead, AsyncWrite, Error, ErrorKind};
 
@@ -51,7 +50,6 @@ where
     transport: T,
     rbuf: BytesMut,
     wbuf: BytesMut,
-    metrics: MetricSink,
     closed: bool,
 }
 
@@ -61,7 +59,6 @@ where
 {
     transport: Option<T>,
     rbuf: BytesMut,
-    metrics: MetricSink,
     bytes_read: usize,
     msgs: EnqueuedRequests<RedisMessage>,
 }
@@ -244,7 +241,6 @@ where
             transport,
             rbuf: BytesMut::new(),
             wbuf: BytesMut::new(),
-            metrics: metrics::get_sink(),
             closed: false,
         }
     }
@@ -278,8 +274,6 @@ where
         match read_message(&mut self.rbuf) {
             Ok(Async::Ready((bytes_read, cmd))) => {
                 trace!("[protocol] got message from client! ({} bytes)", bytes_read);
-                self.metrics
-                    .update_count(Metrics::ServerBytesReceived, bytes_read as i64);
 
                 // If client has quit, mark the stream closed so that we return Ready(None) on the
                 // next call to poll.  This is the easiest way to ensure that all messages before
@@ -347,7 +341,6 @@ where
         RedisMultipleMessages {
             transport: Some(transport),
             rbuf: BytesMut::new(),
-            metrics: metrics::get_sink(),
             bytes_read: 0,
             msgs,
         }
@@ -387,8 +380,6 @@ where
             match result {
                 Ok(Async::Ready((bytes_read, msg))) => {
                     trace!("[protocol] got message from server! ({} bytes)", bytes_read);
-                    self.metrics
-                        .update_count(Metrics::ServerBytesReceived, bytes_read as i64);
 
                     let mut qmsg = self.msgs.remove(0);
                     qmsg.fulfill(msg);

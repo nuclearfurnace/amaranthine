@@ -17,7 +17,7 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use std::io;
+use std::{fmt, io};
 
 #[derive(Debug)]
 pub enum ProtocolError {
@@ -37,6 +37,17 @@ impl ProtocolError {
                 }
             },
             _ => false,
+        }
+    }
+}
+
+impl fmt::Display for ProtocolError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            ProtocolError::IoError(ref ie) => fmt::Display::fmt(ie, f),
+            ProtocolError::Empty => write!(f, "(empty)"),
+            ProtocolError::InvalidProtocol => write!(f, "invalid protocol"),
+            ProtocolError::BackendClosedPrematurely => write!(f, "backend closed prematurely"),
         }
     }
 }

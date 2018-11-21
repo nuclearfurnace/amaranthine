@@ -99,26 +99,19 @@ where
     }
 
     fn get_next_response(&mut self) -> Result<Option<BytesMut>, ProcessorError> {
-        // See if the next slot is even ready yet.  If it's not, then we can't do anything.
-        if !self.is_slot_ready(0) {
-            return Ok(None);
-        }
-
         // If we have an immediately available response aka a standalone message or streaming
         // fragment, just return it.
         let has_immediate = match self.slot_order.front() {
-            None => false,
+            None => return Ok(None),
             Some((slot_id, state)) => {
                 match self.slots.get(*slot_id) {
                     Some(_) => {
                         match state {
-                            MessageState::Standalone => true,
-                            MessageState::Inline => true,
-                            MessageState::StreamingFragmented(_) => true,
+                            MessageState::Standalone | MessageState::Inline | MessageState::StreamingFragmented(_) => true,
                             MessageState::Fragmented(_, _, _) => false,
                         }
                     },
-                    None => false,
+                    None => return Ok(None),
                 }
             },
         };
@@ -198,7 +191,7 @@ where
         I: IntoIterator<Item = AssignedResponse<P::Message>>,
     {
         for (slot, response) in batch.into_iter() {
-            let slot = self.slots.get_mut(slot);
+            let slot = self.slots.get_mut(slot).unwrap();
             match response {
                 MessageResponse::Complete(msg) => {
                     slot.replace(msg);

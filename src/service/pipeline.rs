@@ -34,6 +34,7 @@ pub struct Pipeline<T, S, P>
 where
     T: Sink + Stream<Item = P::Message>,
     S: DirectService<AssignedRequests<P::Message>>,
+    S::Response: IntoIterator<Item = AssignedResponse<P::Message>>,
     P: Processor,
     P::Message: Message + Clone,
 {
@@ -48,8 +49,9 @@ where
 
 impl<T, S, P> Pipeline<T, S, P>
 where
-    T: Sink + Stream<Item = P::Message>,
+    T: Sink<SinkItem = BytesMut> + Stream<Item = P::Message>,
     S: DirectService<AssignedRequests<P::Message>>,
+    S::Response: IntoIterator<Item = AssignedResponse<P::Message>>,
     P: Processor,
     P::Message: Message + Clone,
 {
@@ -149,8 +151,10 @@ where
             match try_ready!(self.transport.poll().map_err(PipelineError::from_stream_error)) {
                 Some(batch) => {
                     let batch = self.queue.enqueue(batch)?;
-                    let fut = self.service.call(batch);
-                    self.responses.push_back(MaybeResponse::Pending(fut));
+                    if batch.len() > 0 {
+                        let fut = self.service.call(batch);
+                        self.responses.push_back(MaybeResponse::Pending(fut));
+                    }
                 },
                 None => {
                     // Our transport has signalled no more messages are going to come in, so mark

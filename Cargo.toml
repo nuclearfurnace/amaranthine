@@ -46,7 +46,6 @@ tokio-evacuate = "^1.1"
 
 [dependencies.slog]
 version = "^2.4"
-features = ["max_level_trace", "release_max_level_info"]
 
 [dependencies.config]
 version = "^0.9"

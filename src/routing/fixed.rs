@@ -61,7 +61,7 @@ where
     fn poll_close(&mut self) -> Poll<(), Self::Error> { Ok(Async::Ready(())) }
 
     fn call(&mut self, req: AssignedRequests<P::Message>) -> Self::Future {
-        let futs = Vec::new();
+        let mut futs = Vec::new();
         let mut batches = HashMap::new();
 
         // Split all the messages out into backend/associated-keys groupings.
@@ -117,6 +117,6 @@ where
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         self.responses
             .poll()
-            .map_err(|e| RouterError::BadResponse("response receiver dropped!".to_owned()))
+            .map_err(|_| RouterError::BadResponse("response receiver dropped!".to_owned()))
     }
 }

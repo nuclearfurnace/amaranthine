@@ -20,6 +20,7 @@
 use backend::processor::ProcessorError;
 use futures::prelude::*;
 use service::DirectService;
+use std::fmt;
 
 pub enum PipelineError<T, S, R>
 where
@@ -34,6 +35,40 @@ where
 
     /// The underlying service failed to process a request.
     Service(S::Error),
+}
+
+impl<T, S, R> fmt::Display for PipelineError<T, S, R>
+where
+    T: Sink + Stream,
+    <T as Sink>::SinkError: fmt::Display,
+    <T as Stream>::Error: fmt::Display,
+    S: DirectService<R>,
+    <S as DirectService<R>>::Error: fmt::Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            PipelineError::TransportReceive(ref se) => fmt::Display::fmt(se, f),
+            PipelineError::TransportSend(ref se) => fmt::Display::fmt(se, f),
+            PipelineError::Service(ref se) => fmt::Display::fmt(se, f),
+        }
+    }
+}
+
+impl<T, S, R> fmt::Debug for PipelineError<T, S, R>
+where
+    T: Sink + Stream,
+    <T as Sink>::SinkError: fmt::Debug,
+    <T as Stream>::Error: fmt::Debug,
+    S: DirectService<R>,
+    <S as DirectService<R>>::Error: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            PipelineError::TransportReceive(ref se) => write!(f, "TransportRecv({:?})", se),
+            PipelineError::TransportSend(ref se) => write!(f, "TransportSend({:?})", se),
+            PipelineError::Service(ref se) => write!(f, "Service({:?})", se),
+        }
+    }
 }
 
 impl<T, S, R> PipelineError<T, S, R>
