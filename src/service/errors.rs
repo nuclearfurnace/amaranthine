@@ -22,6 +22,7 @@ use futures::prelude::*;
 use service::DirectService;
 use std::fmt;
 
+/// Error type for `Pipeline`.
 pub enum PipelineError<T, S, R>
 where
     T: Sink + Stream,

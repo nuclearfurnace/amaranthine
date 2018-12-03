@@ -30,6 +30,11 @@ enum MaybeResponse<T, F> {
     Ready(T),
 }
 
+/// Pipeline-capable service base.
+///
+/// `Pipeline` can simultaenously drive a `Transport` and an underlying `Service`,
+/// opportunistically batching messages from the client transport and handing them off for
+/// processing while waiting to send back to the responses.
 pub struct Pipeline<T, S, P>
 where
     T: Sink + Stream<Item = P::Message>,
@@ -55,6 +60,7 @@ where
     P: Processor,
     P::Message: Message + Clone,
 {
+    /// Creates a new `Pipeline`.
     pub fn new(transport: T, service: S, processor: P) -> Self {
         Pipeline {
             responses: VecDeque::new(),
@@ -130,7 +136,7 @@ where
                 }
             }
 
-            // Now drive our transport to flush any buffers we added just now or previously.
+            // Drive our transport to flush any buffers we have.
             if let Async::Ready(()) = self.transport.poll_complete().map_err(PipelineError::from_sink_error)? {
                 // If we're finished and have nothing else to send, then we're done!
                 if self.finish && self.responses.is_empty() {
