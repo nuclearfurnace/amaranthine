@@ -404,13 +404,6 @@ where
     }
 }
 
-pub fn get_transport<T>(inner: T) -> RedisTransport<T>
-where
-    T: AsyncRead + AsyncWrite,
-{
-    RedisTransport::new(inner)
-}
-
 pub fn read_messages<T>(rx: T, msgs: EnqueuedRequests<RedisMessage>) -> RedisMultipleMessages<T>
 where
     T: AsyncRead,
