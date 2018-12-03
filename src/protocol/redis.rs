@@ -329,7 +329,7 @@ where
 
         try_ready!(self.transport.poll_flush());
 
-        return Ok(Async::Ready(()));
+        Ok(Async::Ready(()))
     }
 }
 

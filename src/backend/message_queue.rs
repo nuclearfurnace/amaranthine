@@ -107,7 +107,9 @@ where
                 match self.slots.get(*slot_id) {
                     Some(_) => {
                         match state {
-                            MessageState::Standalone | MessageState::Inline | MessageState::StreamingFragmented(_) => true,
+                            MessageState::Standalone | MessageState::Inline | MessageState::StreamingFragmented(_) => {
+                                true
+                            },
                             MessageState::Fragmented(_, _, _) => false,
                         }
                     },

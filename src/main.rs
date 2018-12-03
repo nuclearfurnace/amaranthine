@@ -43,6 +43,7 @@ extern crate signal_hook;
 
 extern crate tokio;
 extern crate tokio_io;
+extern crate tokio_io_pool;
 #[macro_use]
 extern crate futures;
 extern crate futures_turnstyle;
@@ -56,9 +57,9 @@ use futures_turnstyle::{Turnstyle, Waiter};
 use signal_hook::iterator::Signals;
 use std::{
     net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr},
-    process, thread,
+    thread,
 };
-use tokio::{io, net::TcpListener, prelude::*, runtime};
+use tokio::{io, net::TcpListener, prelude::*};
 
 #[macro_use]
 extern crate log;
@@ -106,7 +107,7 @@ enum SupervisorCommand {
     Shutdown,
 }
 
-fn run() -> i32 {
+fn main() {
     // Set up our signal handling before anything else.
     let (supervisor_tx, supervisor_rx) = mpsc::unbounded();
     let signals = Signals::new(&[libc::SIGINT, libc::SIGUSR1]).expect("failed to register signal handlers");
@@ -148,22 +149,15 @@ fn run() -> i32 {
     slog_stdlog::init().unwrap();
     info!("[core] logging configured");
 
-    let mut runtime = runtime::Builder::new().build().expect("failed to create tokio runtime");
-
-    let initial = lazy(move || {
+    tokio_io_pool::run(lazy(move || {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         launch_supervisor(supervisor_rx, shutdown_tx);
         launch_stats(configuration.stats_port, shutdown_rx);
 
+        info!("[core] synchrotron running");
+
         ok(())
-    });
-
-    runtime.spawn(initial);
-
-    info!("[core] synchrotron running");
-
-    runtime.shutdown_on_idle().wait().unwrap();
-    0
+    }))
 }
 
 fn launch_supervisor(supervisor_rx: mpsc::UnboundedReceiver<SupervisorCommand>, shutdown_tx: oneshot::Sender<()>) {
@@ -286,9 +280,4 @@ fn launch_stats(port: u16, close: oneshot::Receiver<()>) {
         });
 
     tokio::spawn(typeless(processor));
-}
-
-fn main() {
-    let code = run();
-    process::exit(code);
 }

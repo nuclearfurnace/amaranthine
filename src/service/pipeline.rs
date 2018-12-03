@@ -151,7 +151,7 @@ where
             match try_ready!(self.transport.poll().map_err(PipelineError::from_stream_error)) {
                 Some(batch) => {
                     let batch = self.queue.enqueue(batch)?;
-                    if batch.len() > 0 {
+                    if !batch.is_empty() {
                         let fut = self.service.call(batch);
                         self.responses.push_back(MaybeResponse::Pending(fut));
                     }
