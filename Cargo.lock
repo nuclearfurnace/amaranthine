@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "0.9.1"
+version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "lazy_static 1.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -967,7 +967,7 @@ version = "0.1.0"
 dependencies = [
  "btoi 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bytes 0.4.11 (registry+https://github.com/rust-lang/crates.io-index)",
- "config 0.9.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "config 0.9.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "crossbeam 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "crossbeam-arccell 0.6.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "fnv 1.0.6 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1336,7 +1336,7 @@ dependencies = [
 "checksum cfg-if 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)" = "0c4e7bb64a8ebb0d856483e1e682ea3422f883c5f5615a90d51a2c82fe87fdd3"
 "checksum chrono 0.4.6 (registry+https://github.com/rust-lang/crates.io-index)" = "45912881121cb26fad7c38c17ba7daa18764771836b34fab7d3fbd93ed633878"
 "checksum cloudabi 0.0.3 (registry+https://github.com/rust-lang/crates.io-index)" = "ddfc5b9aa5d4507acaf872de71051dfd0e309860e88966e1051e462a077aac4f"
-"checksum config 0.9.1 (registry+https://github.com/rust-lang/crates.io-index)" = "13490293b8a84cc82cd531da41adeae82cd9eaa40e926ac18865aa361f9c9f60"
+"checksum config 0.9.2 (registry+https://github.com/rust-lang/crates.io-index)" = "3e82d07fac0a5eeaa9d959b5194d01bb66e414665f547416958d2b430f8f4852"
 "checksum crossbeam 0.2.12 (registry+https://github.com/rust-lang/crates.io-index)" = "bd66663db5a988098a89599d4857919b3acf7f61402e61365acfd3919857b9be"
 "checksum crossbeam 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)" = "d7408247b1b87f480890f28b670c5f8d9a8a4274833433fe74dc0dfd46d33650"
 "checksum crossbeam-arccell 0.6.4 (registry+https://github.com/rust-lang/crates.io-index)" = "31d684e6349e9d069d42dd367a4dc9177ce9689e2aaaf40eb88301d5ed10c8d8"
