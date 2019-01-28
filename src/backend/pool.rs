@@ -21,9 +21,11 @@ use super::{distributor, hasher};
 use backend::{processor::Processor, Backend};
 use conf::PoolConfiguration;
 use errors::CreationError;
-use futures::{prelude::*, sync::mpsc};
+use futures::prelude::*;
 use parking_lot::RwLock;
 use std::{collections::HashMap, sync::Arc};
+use tokio::sync::mpsc;
+use hotmic::Sink as MetricSink;
 
 pub struct BackendPool<P>
 where
@@ -33,6 +35,7 @@ where
     distributor: RwLock<Box<distributor::Distributor + Send + Sync>>,
     hasher: Box<hasher::KeyHasher + Send + Sync>,
     backends: Vec<Backend<P>>,
+    sink: MetricSink<&'static str>,
 }
 
 pub struct BackendPoolSupervisor<P, C>
@@ -56,6 +59,7 @@ where
     close: C,
     config: PoolConfiguration,
     noreply: bool,
+    sink: MetricSink<&'static str>,
 }
 
 impl<P> BackendPool<P>
@@ -73,6 +77,11 @@ where
                 healthy_backends.push(backend.get_descriptor());
             }
         }
+
+        let total_backends_count = self.backends.len() as u64;
+        let healthy_backends_count = healthy_backends.len() as u64;
+        self.sink.update_gauge("total_backends", total_backends_count);
+        self.sink.update_gauge("healthy_backends", healthy_backends_count);
 
         // Create a new distributor via seeding and set it.
         let mut distributor = self.distributor.write();
@@ -109,12 +118,15 @@ where
     P::Message: Send,
     C: Future + Clone + Send + 'static,
 {
-    pub fn new(processor: P, close: C, config: PoolConfiguration) -> BackendPoolBuilder<P, C> {
+    pub fn new(name: String, processor: P, close: C, config: PoolConfiguration, sink: MetricSink<&'static str>) -> BackendPoolBuilder<P, C> {
+        let sink = sink.scoped(&["pools", &name]);
+
         BackendPoolBuilder {
             processor,
             close,
             config,
             noreply: false,
+            sink,
         }
     }
 
@@ -134,7 +146,7 @@ where
             .entry("distribution".to_owned())
             .or_insert_with(|| "modulo".to_owned())
             .to_lowercase();
-        let mut distributor = distributor::configure_distributor(&dist_type)?;
+        let distributor = distributor::configure_distributor(&dist_type)?;
         debug!("[listener] using distributor '{}'", dist_type);
 
         let hash_type = options
@@ -147,7 +159,7 @@ where
         // Assemble the list of backends and backend descriptors.
         let mut backends = vec![];
         let mut descriptors = vec![];
-        let (updates_tx, updates_rx) = mpsc::unbounded();
+        let (updates_tx, updates_rx) = mpsc::unbounded_channel();
 
         for address in &self.config.addresses {
             // Create the backend and the backend supervisor.  We spawn the supervisor which deals
@@ -172,14 +184,14 @@ where
             descriptors.push(descriptor);
         }
 
-        // Seed/update the distributor.
-        distributor.seed(descriptors);
-
         let pool = Arc::new(BackendPool {
             backends,
             distributor: RwLock::new(distributor),
             hasher,
+            sink: self.sink,
         });
+
+        pool.update_distributor();
 
         let supervisor = BackendPoolSupervisor {
             pool: pool.clone(),

@@ -178,9 +178,10 @@ fn redis_fragment_messages(msgs: Vec<RedisMessage>) -> Result<Vec<(MessageState,
                         let new_args = args.split_off(arg_take_cnt);
                         args.insert(0, cmd_arg.clone());
                         let new_bulk = redis_new_bulk_from_args(args);
+                        let is_last = new_args.is_empty();
 
                         let state = if is_streaming {
-                            MessageState::StreamingFragmented(streaming_hdr.take())
+                            MessageState::StreamingFragmented(streaming_hdr.take(), is_last)
                         } else {
                             // Normal fragments need to know the command they're being used for so
                             // we can properly form a command-specific response when we ultimate

@@ -27,6 +27,7 @@ extern crate lazy_static;
 #[macro_use]
 extern crate crossbeam;
 extern crate parking_lot;
+extern crate warp;
 
 extern crate config;
 extern crate crypto;
@@ -34,6 +35,7 @@ extern crate fnv;
 extern crate pruefung;
 extern crate serde;
 extern crate serde_json;
+extern crate hdrhistogram;
 #[macro_use]
 extern crate serde_derive;
 extern crate slab;
@@ -49,17 +51,14 @@ extern crate futures;
 extern crate futures_turnstyle;
 extern crate net2;
 
-use futures::{
-    future::{lazy, ok},
-    sync::{mpsc, oneshot},
-};
+use futures::future::{lazy, ok};
 use futures_turnstyle::{Turnstyle, Waiter};
 use signal_hook::iterator::Signals;
-use std::{
-    net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr},
-    thread,
+use std::thread;
+use tokio::{
+    prelude::*,
+    sync::{mpsc, oneshot}
 };
-use tokio::{io, net::TcpListener, prelude::*};
 
 #[macro_use]
 extern crate log;
@@ -109,22 +108,22 @@ enum SupervisorCommand {
 
 fn main() {
     // Set up our signal handling before anything else.
-    let (supervisor_tx, supervisor_rx) = mpsc::unbounded();
+    let (mut supervisor_tx, supervisor_rx) = mpsc::unbounded_channel();
     let signals = Signals::new(&[libc::SIGINT, libc::SIGUSR1]).expect("failed to register signal handlers");
     thread::spawn(move || {
         // Do an initial send of the launch command to trigger actually spawning the listeners at
         // startup.
-        let _ = supervisor_tx.unbounded_send(SupervisorCommand::Launch);
+        let _ = supervisor_tx.try_send(SupervisorCommand::Launch);
 
         for signal in signals.forever() {
             info!("[core] signal received: {:?}", signal);
 
             match signal {
                 libc::SIGUSR1 => {
-                    let _ = supervisor_tx.unbounded_send(SupervisorCommand::Reload);
+                    let _ = supervisor_tx.try_send(SupervisorCommand::Reload);
                 },
                 libc::SIGINT => {
-                    let _ = supervisor_tx.unbounded_send(SupervisorCommand::Shutdown);
+                    let _ = supervisor_tx.try_send(SupervisorCommand::Shutdown);
                     break;
                 },
                 _ => {}, // we don't care about the rest
@@ -151,8 +150,8 @@ fn main() {
 
     tokio_io_pool::run(lazy(move || {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        launch_metrics(configuration.stats_addr, shutdown_rx);
         launch_supervisor(supervisor_rx, shutdown_tx);
-        launch_stats(configuration.stats_port, shutdown_rx);
 
         info!("[core] synchrotron running");
 
@@ -161,19 +160,23 @@ fn main() {
 }
 
 fn launch_supervisor(supervisor_rx: mpsc::UnboundedReceiver<SupervisorCommand>, shutdown_tx: oneshot::Sender<()>) {
+    let sink = metrics::get_sink().scoped("supervisor");
+
     let turnstyle = Turnstyle::new();
     let supervisor = supervisor_rx
         .map_err(|_| CreationError::ListenerSpawnFailed)
-        .fold(turnstyle, |ts, command| {
+        .fold(turnstyle, move |ts, command| {
             match command {
                 SupervisorCommand::Launch => {
                     let (version, waiter) = ts.join();
                     launch_listeners(version, waiter)?;
+                    sink.increment("configuration_loads");
                 },
                 SupervisorCommand::Reload => {
                     let (version, waiter) = ts.join();
                     launch_listeners(version, waiter)?;
                     ts.turn();
+                    sink.increment("configuration_loads");
                 },
                 SupervisorCommand::Shutdown => {
                     ts.turn();
@@ -199,11 +202,10 @@ fn launch_listeners(version: usize, close: Waiter) -> Result<(), CreationError> 
     let listeners = configuration
         .listeners
         .into_iter()
-        .map(|x| {
+        .map(|(name, config)| {
             let close = closer.clone();
-            let config = x.clone();
 
-            listener::from_config(version, config, close)
+            listener::from_config(version, name, config, close)
         })
         .collect::<Vec<_>>();
 
@@ -233,51 +235,12 @@ fn launch_listeners(version: usize, close: Waiter) -> Result<(), CreationError> 
     Ok(())
 }
 
-// TODO: this should 100% be using either tower-web or warp.  it's super janky as-is.  it should
-// also move to the metrics module where we can simply spawn it after getting the service from a
-// builder function.
-fn launch_stats(port: u16, close: oneshot::Receiver<()>) {
-    // Touch the global registry for the first time to initialize it.
+fn launch_metrics(stats_addr: String, shutdown_rx: impl Future<Item = ()> + Send + 'static) {
+    let addr = stats_addr.parse().expect("failed to parse metrics listen address");
     let facade = metrics::get_facade();
+    let controller = facade.get_controller();
+    let http = metrics::build_with_graceful_shutdown(addr, controller, shutdown_rx);
 
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
-    let listener = TcpListener::bind(&addr).unwrap();
-    let processor = listener
-        .incoming()
-        .map_err(|e| eprintln!("failed to accept stats connection: {:?}", e))
-        .inspect(|_| debug!("got new stats connection"))
-        .for_each(move |socket| {
-            facade
-                .get_snapshot()
-                .into_future()
-                .map_err(|e| eprintln!("failed to get metrics snapshot: {:?}", e))
-                .and_then(|snapshot| {
-                    let mut output = "{".to_owned();
-
-                    for (stat, value) in snapshot.signed_data {
-                        output = output + &format!("\"{}\":{},", stat, value);
-                    }
-                    for (stat, value) in snapshot.unsigned_data {
-                        output = output + &format!("\"{}\":{},", stat, value);
-                    }
-                    if output.len() > 1 {
-                        output.pop();
-                    }
-                    output += "}";
-
-                    ok(output)
-                })
-                .and_then(|buf| io::write_all(socket, buf.into_bytes()).map_err(|_| ()))
-                .and_then(|(c, _)| {
-                    c.shutdown(Shutdown::Both).unwrap();
-                    ok(())
-                })
-        })
-        .select2(close)
-        .and_then(|_| {
-            trace!("[stats] closing stats listener");
-            ok(())
-        });
-
-    tokio::spawn(typeless(processor));
+    tokio::spawn(http);
+    info!("[metrics] serving metric data on {}...", stats_addr);
 }

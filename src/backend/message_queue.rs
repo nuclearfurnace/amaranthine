@@ -58,7 +58,11 @@ pub enum MessageState {
     /// The optional buffer represents a header that can be sent before the actual fragment.  This
     /// allows sending any response data that is needed to coalesce the fragments into a meaningful
     /// response to the client.
-    StreamingFragmented(Option<BytesMut>),
+    ///
+    /// The boolean marks whether this streaming fragment represents the end of the response to the
+    /// client for a given input message.  For example, if the client sent in a multi-get that
+    /// asked for 10 keys, the 10th streaming fragment would be the "end" of the response.
+    StreamingFragmented(Option<BytesMut>, bool),
 }
 
 pub struct MessageQueue<P>
@@ -98,7 +102,7 @@ where
         }
     }
 
-    fn get_next_response(&mut self) -> Result<Option<BytesMut>, ProcessorError> {
+    fn get_next_response(&mut self) -> Result<Option<(BytesMut, u64)>, ProcessorError> {
         // If we have an immediately available response aka a standalone message or streaming
         // fragment, just return it.
         let has_immediate = match self.slot_order.front() {
@@ -107,7 +111,7 @@ where
                 match self.slots.get(*slot_id) {
                     Some(_) => {
                         match state {
-                            MessageState::Standalone | MessageState::Inline | MessageState::StreamingFragmented(_) => {
+                            MessageState::Standalone | MessageState::Inline | MessageState::StreamingFragmented(_, _) => {
                                 true
                             },
                             MessageState::Fragmented(_, _, _) => false,
@@ -122,21 +126,22 @@ where
             let (slot_id, state) = self.slot_order.pop_front().unwrap();
             let slot = self.slots.remove(slot_id).unwrap();
 
-            let buf = match state {
-                MessageState::Standalone | MessageState::Inline => slot.into_buf(),
-                MessageState::StreamingFragmented(header) => {
+            let (buf, count) = match state {
+                MessageState::Standalone | MessageState::Inline => (slot.into_buf(), 1),
+                MessageState::StreamingFragmented(header, is_last) => {
+                    let count = if is_last { 1 } else { 0 };
                     match header {
                         Some(mut header_buf) => {
                             header_buf.unsplit(slot.into_buf());
-                            header_buf
+                            (header_buf, count)
                         },
-                        None => slot.into_buf(),
+                        None => (slot.into_buf(), count),
                     }
                 },
                 _ => unreachable!(),
             };
 
-            return Ok(Some(buf));
+            return Ok(Some((buf, count)));
         }
 
         // Now we know that the next slot has been fulfilled, and that it's a fragmented message.
@@ -167,7 +172,7 @@ where
         }
 
         let msg = self.processor.defragment_messages(fragments)?;
-        Ok(Some(msg.into_buf()))
+        Ok(Some((msg.into_buf(), 1)))
     }
 
     pub fn enqueue(&mut self, msgs: Vec<P::Message>) -> Result<AssignedRequests<P::Message>, ProcessorError> {
@@ -206,22 +211,24 @@ where
         }
     }
 
-    pub fn get_sendable_buf(&mut self) -> Option<BytesMut> {
+    pub fn get_sendable_buf(&mut self) -> Option<(BytesMut, u64)> {
         if !self.is_slot_ready(0) {
             return None;
         }
 
         let mut mbuf = BytesMut::new();
+        let mut mcount = 0;
         loop {
             let resp = self.get_next_response();
             match resp {
-                Ok(Some(buf)) => {
+                Ok(Some((buf, count))) => {
+                    mcount += count;
                     mbuf.unsplit(buf);
                 },
                 _ => break,
             }
         }
 
-        Some(mbuf)
+        Some((mbuf, mcount))
     }
 }

@@ -24,6 +24,7 @@ use futures::prelude::*;
 use service::{DirectService, PipelineError};
 use std::collections::VecDeque;
 use util::Batch;
+use hotmic::Sink as MetricSink;
 
 enum MaybeResponse<T, F> {
     Pending(F),
@@ -48,8 +49,10 @@ where
     service: S,
     queue: MessageQueue<P>,
 
-    send_buf: Option<BytesMut>,
+    send_buf: Option<(BytesMut, u64)>,
     finish: bool,
+
+    sink: MetricSink<&'static str>,
 }
 
 impl<T, S, P> Pipeline<T, S, P>
@@ -61,7 +64,7 @@ where
     P::Message: Message + Clone,
 {
     /// Creates a new `Pipeline`.
-    pub fn new(transport: T, service: S, processor: P) -> Self {
+    pub fn new(transport: T, service: S, processor: P, sink: MetricSink<&'static str>) -> Self {
         Pipeline {
             responses: VecDeque::new(),
             transport: Batch::new(transport, 128),
@@ -69,6 +72,7 @@ where
             queue: MessageQueue::new(processor),
             send_buf: None,
             finish: false,
+            sink,
         }
     }
 }
@@ -118,22 +122,26 @@ where
             // to send: first, we might be holding on to a buffer we got from the queue that
             // hasn't been sendable, or we might be trying to get a buffer to send period.
             if self.send_buf.is_some() {
-                let buf = self.send_buf.take().unwrap();
+                let (buf, count) = self.send_buf.take().unwrap();
                 if let AsyncSink::NotReady(buf) =
                     self.transport.start_send(buf).map_err(PipelineError::from_sink_error)?
                 {
-                    self.send_buf = Some(buf);
+                    self.send_buf = Some((buf, count));
                     return Ok(Async::NotReady);
                 }
+
+                self.sink.update_count("messages_sent", count as i64);
             }
 
-            if let Some(buf) = self.queue.get_sendable_buf() {
+            if let Some((buf, count)) = self.queue.get_sendable_buf() {
                 if let AsyncSink::NotReady(buf) =
                     self.transport.start_send(buf).map_err(PipelineError::from_sink_error)?
                 {
-                    self.send_buf = Some(buf);
+                    self.send_buf = Some((buf, count));
                     return Ok(Async::NotReady);
                 }
+
+                self.sink.update_count("messages_sent", count as i64);
             }
 
             // Drive our transport to flush any buffers we have.
@@ -156,6 +164,7 @@ where
             // See if we can pull a batch from the transport.
             match try_ready!(self.transport.poll().map_err(PipelineError::from_stream_error)) {
                 Some(batch) => {
+                    self.sink.update_count("messages_received", batch.len() as i64);
                     let batch = self.queue.enqueue(batch)?;
                     if !batch.is_empty() {
                         let fut = self.service.call(batch);

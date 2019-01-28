@@ -22,9 +22,9 @@ use std::{collections::HashMap, env, net::SocketAddr};
 
 #[derive(Deserialize, Default, Clone, Debug)]
 pub struct Configuration {
-    pub stats_port: u16,
+    pub stats_addr: String,
     pub logging: LoggingConfiguration,
-    pub listeners: Vec<ListenerConfiguration>,
+    pub listeners: HashMap<String, ListenerConfiguration>,
 }
 
 #[derive(Deserialize, Default, Clone, Debug)]
@@ -58,7 +58,7 @@ impl Configuration {
         s.set_default("logging.level", "info")?;
         // how tf do we make this work?
         // s.set_default("listeners", Vec::<ListenerConfiguration>::new())?;
-        s.set_default("stats_port", 16161)?;
+        s.set_default("stats_addr", "0.0.0.0:16161")?;
 
         // Now load in any configuration files we can find.
         s.merge(File::with_name("config/synchrotron").required(false))?;

@@ -17,7 +17,7 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use futures::{future::ok, sync::mpsc, Future};
+use futures::{future::ok, Future};
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
@@ -25,7 +25,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::timer::Delay;
+use tokio::{timer::Delay, sync::mpsc};
 use util::typeless;
 
 pub(crate) struct BackendHealth {
@@ -90,13 +90,13 @@ impl BackendHealth {
     fn fire_cooloff_check(&self) {
         let in_cooloff = self.in_cooloff.clone();
         let error_count = self.error_count.clone();
-        let updates_tx = self.updates_tx.clone();
+        let mut updates_tx = self.updates_tx.clone();
         let deadline = Instant::now() + Duration::from_millis(self.cooloff_period_ms);
         let delay = Delay::new(deadline).then(move |_| {
             debug!("[health] resetting cooloff");
             in_cooloff.store(false, SeqCst);
             error_count.store(0, SeqCst);
-            let _ = updates_tx.unbounded_send(());
+            let _ = updates_tx.try_send(());
             ok::<_, ()>(())
         });
 

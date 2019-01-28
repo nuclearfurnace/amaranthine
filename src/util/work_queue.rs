@@ -69,7 +69,7 @@ impl<T> WorkQueue<T> {
     }
 
     fn notify_one(&self) -> bool {
-        while let Some(waiter) = self.wait_rx.try_recv() {
+        while let Ok(waiter) = self.wait_rx.try_recv() {
             self.waiters.push(waiter)
         }
 
@@ -141,7 +141,10 @@ impl<T> Stream for Worker<T> {
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         select! {
-            recv(self.work_rx, msg) => Ok(Async::Ready(msg)),
+            recv(self.work_rx) -> msg => match msg {
+                Ok(x) => Ok(Async::Ready(Some(x))),
+                Err(_) => Ok(Async::Ready(None)),
+            },
             default => {
                 self.park();
                 Ok(Async::NotReady)

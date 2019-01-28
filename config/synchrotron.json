@@ -2,8 +2,8 @@
   "logging": {
     "level": "info"
   },
-  "listeners": [
-    {
+  "listeners": {
+    "fixed": {
       "protocol": "redis",
       "address": "127.0.0.1:6380",
       "pools": {
@@ -15,7 +15,7 @@
         "type": "fixed"
       }
     },
-    {
+    "fixed_spread": {
       "protocol": "redis",
       "address": "127.0.0.1:6381",
       "pools": {
@@ -27,7 +27,7 @@
         "type": "fixed"
       }
     },
-    {
+    "shadow": {
       "protocol": "redis",
       "address": "127.0.0.1:6384",
       "pools": {
@@ -42,5 +42,5 @@
         "type": "shadow"
       }
     }
-  ]
+  }
 }

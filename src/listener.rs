@@ -27,8 +27,9 @@ use futures::{
     prelude::*,
 };
 use futures_turnstyle::Waiter;
-use metrics::{self, Metrics};
 use net2::TcpBuilder;
+use metrics::get_sink;
+use hotmic::Sink as MetricSink;
 use protocol::errors::ProtocolError;
 use routing::{FixedRouter, ShadowRouter};
 use service::{DirectService, Pipeline};
@@ -36,6 +37,7 @@ use std::{collections::HashMap, fmt::Display, net::SocketAddr};
 use tokio::{io, net::TcpListener, reactor};
 use tokio_evacuate::{Evacuate, Warden};
 use util::typeless;
+use service::PipelineError;
 
 type GenericRuntimeFuture = Box<Future<Item = (), Error = ()> + Send + 'static>;
 
@@ -45,7 +47,7 @@ type GenericRuntimeFuture = Box<Future<Item = (), Error = ()> + Send + 'static>;
 /// spawn a task to process all of the messages from that client until the client disconnects or
 /// there is an unrecoverable connection/protocol error.
 pub fn from_config(
-    version: usize, config: ListenerConfiguration, close: Shared<Waiter>,
+    version: usize, name: String, config: ListenerConfiguration, close: Shared<Waiter>,
 ) -> Result<GenericRuntimeFuture, CreationError> {
     // Create the actual listener proper.
     let listen_address = config.address.clone();
@@ -54,7 +56,7 @@ pub fn from_config(
     // Now build our handler: this is what's actually going to do the real work.
     let protocol = config.protocol.to_lowercase();
     let handler = match protocol.as_str() {
-        "redis" => routing_from_config(config, listener, close.clone(), RedisProcessor::new()),
+        "redis" => routing_from_config(name, config, listener, close.clone(), RedisProcessor::new()),
         s => Err(CreationError::InvalidResource(format!("unknown cache protocol: {}", s))),
     }?;
 
@@ -74,7 +76,7 @@ pub fn from_config(
 }
 
 fn routing_from_config<P, C>(
-    config: ListenerConfiguration, listener: TcpListener, close: C, processor: P,
+    name: String, config: ListenerConfiguration, listener: TcpListener, close: C, processor: P,
 ) -> Result<GenericRuntimeFuture, CreationError>
 where
     P: Processor + Clone + Send + 'static,
@@ -89,6 +91,9 @@ where
     let (warden, evacuate) = Evacuate::new(close, reload_timeout_ms);
     let closer = evacuate.shared();
 
+    // Get our scoped metric sink.
+    let sink = get_sink().scoped(&["listeners", &name]);
+
     // Extract all the configured pools and build a backend pool for them.
     let mut pools = HashMap::new();
     let pool_configs = config.pools.clone();
@@ -99,7 +104,7 @@ where
             config.address.clone()
         );
 
-        let pool = BackendPoolBuilder::new(processor.clone(), closer.clone(), pool_config);
+        let pool = BackendPoolBuilder::new(pool_name.clone(), processor.clone(), closer.clone(), pool_config, sink.clone());
         pools.insert(pool_name, pool);
     }
 
@@ -110,14 +115,15 @@ where
         .or_insert_with(|| "fixed".to_owned())
         .to_lowercase();
     match route_type.as_str() {
-        "fixed" => get_fixed_router(listener, pools, processor, warden, closer.clone()),
-        "shadow" => get_shadow_router(listener, pools, processor, warden, closer.clone()),
+        "fixed" => get_fixed_router(listener, pools, processor, warden, closer, sink),
+        "shadow" => get_shadow_router(listener, pools, processor, warden, closer, sink),
         x => Err(CreationError::InvalidResource(format!("unknown route type '{}'", x))),
     }
 }
 
 fn get_fixed_router<P, C>(
-    listener: TcpListener, mut pools: HashMap<String, BackendPoolBuilder<P, C>>, processor: P, warden: Warden, close: C,
+    listener: TcpListener, mut pools: HashMap<String, BackendPoolBuilder<P, C>>, processor: P,
+    warden: Warden, close: C, sink: MetricSink<&'static str>,
 ) -> Result<GenericRuntimeFuture, CreationError>
 where
     P: Processor + Clone + Send + 'static,
@@ -133,11 +139,12 @@ where
         .build()?;
     let router = FixedRouter::new(processor.clone(), default_pool);
 
-    build_router_chain(listener, processor, router, warden, close)
+    build_router_chain(listener, processor, router, warden, close, sink)
 }
 
 fn get_shadow_router<P, C>(
-    listener: TcpListener, mut pools: HashMap<String, BackendPoolBuilder<P, C>>, processor: P, warden: Warden, close: C,
+    listener: TcpListener, mut pools: HashMap<String, BackendPoolBuilder<P, C>>, processor: P,
+    warden: Warden, close: C, sink: MetricSink<&'static str>,
 ) -> Result<GenericRuntimeFuture, CreationError>
 where
     P: Processor + Clone + Send + 'static,
@@ -160,11 +167,12 @@ where
 
     let router = ShadowRouter::new(processor.clone(), default_pool, shadow_pool);
 
-    build_router_chain(listener, processor, router, warden, close)
+    build_router_chain(listener, processor, router, warden, close, sink)
 }
 
 fn build_router_chain<P, R, C>(
     listener: TcpListener, processor: P, router: R, warden: Warden, close: C,
+    sink: MetricSink<&'static str>,
 ) -> Result<GenericRuntimeFuture, CreationError>
 where
     P: Processor + Clone + Send + 'static,
@@ -182,31 +190,39 @@ where
     let task = listener
         .incoming()
         .for_each(move |client| {
-            debug!("[client] connected");
             warden.increment();
-            let mut metrics = metrics::get_sink();
-            metrics.increment(Metrics::ClientsConnected);
+            sink.increment("clients_connected");
 
             let router = router.clone();
             let processor = processor.clone();
             let close = close.clone();
             let warden2 = warden.clone();
+            let sink2 = sink.clone();
             let client_addr = client.peer_addr().unwrap();
+            debug!("[client] {} connected", client_addr);
 
             let transport = processor.get_transport(client);
-            let runner = Pipeline::new(transport, router, processor)
+            let runner = Pipeline::new(transport, router, processor, sink.clone())
                 .then(move |result| {
                     match result {
                         Ok(_) => {
-                            debug!("[client] disconnected");
-                            metrics.decrement(Metrics::ClientsConnected);
+                            debug!("[client] {} disconnected", client_addr);
                         },
-                        Err(e) => {
-                            error!("[client] error from client: {}", e);
+                        Err(e) => match e {
+                            // If we got a protocol error from a client, that's bad.  Otherwise,
+                            // clients closing their connection is a normal thing.
+                            PipelineError::TransportReceive(ie) => {
+                                if !ie.client_closed() {
+                                    sink2.increment("client_errors");
+                                    error!("[client] transport error from {}: {}", client_addr, ie);
+                                }
+                            },
+                            e => error!("[client] error from {}: {}", client_addr, e),
                         },
                     }
 
                     warden2.decrement();
+                    sink2.decrement("clients_connected");
 
                     ok::<(), ()>(())
                 })

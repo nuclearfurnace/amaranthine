@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 use bytes::BytesMut;
-use futures::sync::oneshot::{channel, Receiver, Sender};
+use tokio::sync::oneshot::{channel, Receiver, Sender};
 
 pub trait Message {
     fn key(&self) -> &[u8];

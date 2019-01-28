@@ -34,12 +34,12 @@ use errors::CreationError;
 use futures::{
     future::{ok, Either},
     prelude::*,
-    sync::mpsc,
     Poll,
 };
 use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 use tokio::{
     net::tcp::TcpStream,
+    sync::mpsc,
     timer::{timeout::Error as TimeoutError, Timeout},
 };
 use util::{ProcessFuture, WorkQueue, Worker};
@@ -128,7 +128,7 @@ where
                         // On error, we kill ourselves but notify the supervisor first so it can
                         // replace us down the line.  This includes both errors with the underlying
                         // call itself or timing out during the call.
-                        let _ = self.command_tx.unbounded_send(BackendCommand::Error);
+                        let _ = self.command_tx.try_send(BackendCommand::Error);
                         return Err(());
                     },
                 }
@@ -158,7 +158,7 @@ where
                 Ok(Async::Ready(None)) => return Ok(Async::Ready(())),
                 Ok(Async::NotReady) => return Ok(Async::NotReady),
                 Err(_) => {
-                    let _ = self.command_tx.unbounded_send(BackendCommand::Error);
+                    let _ = self.command_tx.try_send(BackendCommand::Error);
                     return Err(());
                 },
             }
@@ -240,7 +240,7 @@ where
         }
 
         if !self.health.is_healthy() {
-            let _ = self.updates_tx.unbounded_send(());
+            let _ = self.updates_tx.try_send(());
         }
 
         // Make sure all connections have been spawned.
@@ -297,7 +297,7 @@ where
     let timeout_ms = u64::from_str(timeout_ms_raw.as_str())
         .map_err(|_| CreationError::InvalidParameter("options.timeout_ms".to_string()))?;
 
-    let (command_tx, command_rx) = mpsc::unbounded();
+    let (command_tx, command_rx) = mpsc::unbounded_channel();
 
     Ok(BackendSupervisor {
         processor,
