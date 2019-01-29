@@ -123,6 +123,7 @@ where
             // hasn't been sendable, or we might be trying to get a buffer to send period.
             if self.send_buf.is_some() {
                 let (buf, count) = self.send_buf.take().unwrap();
+                let buf_len = buf.len();
                 if let AsyncSink::NotReady(buf) =
                     self.transport.start_send(buf).map_err(PipelineError::from_sink_error)?
                 {
@@ -131,9 +132,11 @@ where
                 }
 
                 self.sink.update_count("messages_sent", count as i64);
+                self.sink.update_count("bytes_sent", buf_len as i64);
             }
 
             if let Some((buf, count)) = self.queue.get_sendable_buf() {
+                let buf_len = buf.len();
                 if let AsyncSink::NotReady(buf) =
                     self.transport.start_send(buf).map_err(PipelineError::from_sink_error)?
                 {
@@ -142,6 +145,7 @@ where
                 }
 
                 self.sink.update_count("messages_sent", count as i64);
+                self.sink.update_count("bytes_sent", buf_len as i64);
             }
 
             // Drive our transport to flush any buffers we have.
@@ -165,6 +169,8 @@ where
             match try_ready!(self.transport.poll().map_err(PipelineError::from_stream_error)) {
                 Some(batch) => {
                     self.sink.update_count("messages_received", batch.len() as i64);
+                    let batch_bytes_recv = batch.iter().fold(0, |acc, m| acc + m.size());
+                    self.sink.update_count("bytes_received", batch_bytes_recv as i64);
                     let batch = self.queue.enqueue(batch)?;
                     if !batch.is_empty() {
                         let fut = self.service.call(batch);

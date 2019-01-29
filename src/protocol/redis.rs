@@ -229,6 +229,20 @@ impl Message for RedisMessage {
         }
     }
 
+    fn size(&self) -> usize {
+        match self {
+            RedisMessage::Null => REDIS_NULL_BUF[..].len(),
+            RedisMessage::OK => REDIS_OK_BUF[..].len(),
+            RedisMessage::Ping => REDIS_PING_RESP_BUF[..].len(),
+            RedisMessage::Quit => REDIS_OK_BUF[..].len(),
+            RedisMessage::Status(ref buf, _) => buf.len(),
+            RedisMessage::Error(ref buf, _) => buf.len(),
+            RedisMessage::Integer(ref buf, _) => buf.len(),
+            RedisMessage::Data(ref buf, _) => buf.len(),
+            RedisMessage::Bulk(ref buf, _) => buf.len(),
+        }
+    }
+
     fn into_buf(self) -> BytesMut { self.into_resp() }
 }
 

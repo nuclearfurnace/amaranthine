@@ -33,9 +33,6 @@ extern crate config;
 extern crate crypto;
 extern crate fnv;
 extern crate pruefung;
-extern crate serde;
-extern crate serde_json;
-extern crate hdrhistogram;
 #[macro_use]
 extern crate serde_derive;
 extern crate slab;

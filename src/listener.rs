@@ -202,7 +202,7 @@ where
             debug!("[client] {} connected", client_addr);
 
             let transport = processor.get_transport(client);
-            let runner = Pipeline::new(transport, router, processor, sink.clone())
+            let runner = Pipeline::new(transport, router, processor, sink.scoped("client"))
                 .then(move |result| {
                     match result {
                         Ok(_) => {
