@@ -13,9 +13,9 @@ static PORT_OFFSET: AtomicUsize = ATOMIC_USIZE_INIT;
 fn get_redis_config(stats_port: u16, listen1_port: u16, listen2_port: u16, redis1_port: u16, redis2_port: u16) -> String {
     format!(r#"
         {{
-            "stats_port": {stats_port},
-            "listeners": [
-                {{
+            "stats_addr": "127.0.0.1:{stats_port}",
+            "listeners": {{
+                "fixed": {{
                     "protocol": "redis",
                     "address": "127.0.0.1:{listen1_port}",
                     "pools": {{
@@ -31,7 +31,7 @@ fn get_redis_config(stats_port: u16, listen1_port: u16, listen2_port: u16, redis
                         "type": "fixed"
                     }}
                 }},
-                {{
+                "shadow": {{
                     "protocol": "redis",
                     "address": "127.0.0.1:{listen2_port}",
                     "pools": {{
@@ -46,7 +46,7 @@ fn get_redis_config(stats_port: u16, listen1_port: u16, listen2_port: u16, redis
                         "type": "shadow"
                     }}
                 }}
-            ]
+            }}
         }}
     "#, stats_port = stats_port, listen1_port = listen1_port, listen2_port = listen2_port, redis1_port = redis1_port, redis2_port = redis2_port)
 }
@@ -76,8 +76,8 @@ impl SynchrotronRunner {
         // Now try and launch Synchrotron.
         let handle = Command::new("../target/debug/synchrotron")
             .env("SYNC_CONFIG", file_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .spawn()?;
 
         wait_until(|| check_synchrotron(listen1_port));
