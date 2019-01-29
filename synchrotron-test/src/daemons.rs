@@ -76,8 +76,8 @@ impl SynchrotronRunner {
         // Now try and launch Synchrotron.
         let handle = Command::new("../target/debug/synchrotron")
             .env("SYNC_CONFIG", file_path)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()?;
 
         wait_until(|| check_synchrotron(listen1_port));
