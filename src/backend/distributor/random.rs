@@ -23,17 +23,27 @@ use rand::{thread_rng, Rng};
 /// Provides a randomized distribution of requests.
 pub struct RandomDistributor {
     backend_count: usize,
+    backends: Vec<BackendDescriptor>,
 }
 
 impl RandomDistributor {
-    pub fn new() -> RandomDistributor { RandomDistributor { backend_count: 0 } }
+    pub fn new() -> RandomDistributor {
+        RandomDistributor {
+            backend_count: 0,
+            backends: Vec::new(),
+        }
+    }
 }
 
 impl Distributor for RandomDistributor {
-    fn seed(&mut self, backends: Vec<BackendDescriptor>) { self.backend_count = backends.len(); }
+    fn update(&mut self, backends: Vec<BackendDescriptor>) {
+        self.backends = backends;
+        self.backend_count = self.backends.len();
+    }
 
     fn choose(&self, _point: u64) -> usize {
         let mut rng = thread_rng();
-        rng.gen_range(0, self.backend_count)
+        let idx = rng.gen_range(0, self.backend_count);
+        self.backends[idx].idx
     }
 }

@@ -17,11 +17,11 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use std::{fmt, io};
+use std::{error, fmt, io};
+use tokio::sync::oneshot;
 
 #[derive(Debug)]
 pub enum ProtocolError {
-    Empty,
     IoError(io::Error),
     InvalidProtocol,
     BackendClosedPrematurely,
@@ -41,11 +41,22 @@ impl ProtocolError {
     }
 }
 
+impl error::Error for ProtocolError {
+    fn description(&self) -> &str {
+        match *self {
+            ProtocolError::IoError(ref e) => e.description(),
+            ProtocolError::InvalidProtocol => "invalid protocol",
+            ProtocolError::BackendClosedPrematurely => "backend closed prematurely",
+        }
+    }
+
+    fn cause(&self) -> Option<&error::Error> { None }
+}
+
 impl fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             ProtocolError::IoError(ref ie) => fmt::Display::fmt(ie, f),
-            ProtocolError::Empty => write!(f, "(empty)"),
             ProtocolError::InvalidProtocol => write!(f, "invalid protocol"),
             ProtocolError::BackendClosedPrematurely => write!(f, "backend closed prematurely"),
         }
@@ -54,4 +65,13 @@ impl fmt::Display for ProtocolError {
 
 impl From<io::Error> for ProtocolError {
     fn from(e: io::Error) -> ProtocolError { ProtocolError::IoError(e) }
+}
+
+impl From<oneshot::error::RecvError> for ProtocolError {
+    fn from(_: oneshot::error::RecvError) -> ProtocolError {
+        // It's not the most descriptive, but we really only get receiver errors when
+        // we fail to finish a batch to respond back with either the value or the error
+        // from the backend, so it sort of fits.
+        ProtocolError::BackendClosedPrematurely
+    }
 }

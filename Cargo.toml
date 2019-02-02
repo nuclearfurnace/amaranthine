@@ -10,25 +10,27 @@ opt-level = 3
 
 [profile.bench]
 debug = true
-lto = true
 opt-level = 3
 
 [dependencies]
 lazy_static = "^1.2"
-log = "^0.4"
+derivative = "^1.0"
+log = { version = "^0.4", features = ["max_level_trace", "release_max_level_info"] }
+slog = "^2.4"
 slog-async = "^2.3"
 slog-scope = "^4.0"
 slog-stdlog = "^3.0"
 slog-term = "^2.4"
 serde = "^1.0"
 serde_derive = "^1.0"
-tokio-io = "^0.1"
+tokio = { version = "^0.1", features = ["io", "sync", "tcp", "timer"] }
+tokio-executor = "^0.1"
 tokio-io-pool = "^0.1"
 futures = "^0.1"
 net2 = "^0.2"
 libc = "^0.2"
 signal-hook = "^0.1"
-futures-turnstyle = "^3.0"
+futures-turnstyle = { path = "../rust-futures-turnstyle" }
 bytes = "^0.4"
 btoi = "^0.4"
 itoa = "^0.4"
@@ -38,18 +40,12 @@ pruefung = "^0.2"
 fnv = "^1.0"
 hotmic = "^0.7"
 slab = "^0.4"
-crossbeam = "^0.6"
-crossbeam-arccell = "^0.6"
-parking_lot = "^0.7"
-tokio-evacuate = "^1.1"
+tokio-evacuate = { path = "../tokio-evacuate" }
 warp = "^0.1"
-
-[dependencies.tokio]
-version = "^0.1"
-features = ["sync"]
-
-[dependencies.slog]
-version = "^2.4"
+tower = { git = "https://github.com/nuclearfurnace/tower" }
+tower-service = { git = "https://github.com/nuclearfurnace/tower" }
+tower-direct-service = { git = "https://github.com/nuclearfurnace/tower" }
+tower-buffer = { git = "https://github.com/nuclearfurnace/tower" }
 
 [dependencies.config]
 version = "^0.9"

@@ -21,15 +21,11 @@ use backend::{message_queue::MessageQueue, processor::Processor};
 use bytes::BytesMut;
 use common::{AssignedRequests, AssignedResponse, Message};
 use futures::prelude::*;
-use service::{DirectService, PipelineError};
-use std::collections::VecDeque;
-use util::Batch;
 use hotmic::Sink as MetricSink;
-
-enum MaybeResponse<T, F> {
-    Pending(F),
-    Ready(T),
-}
+use service::PipelineError;
+use std::collections::VecDeque;
+use tower_service::Service;
+use util::Batch;
 
 /// Pipeline-capable service base.
 ///
@@ -39,12 +35,12 @@ enum MaybeResponse<T, F> {
 pub struct Pipeline<T, S, P>
 where
     T: Sink + Stream<Item = P::Message>,
-    S: DirectService<AssignedRequests<P::Message>>,
+    S: Service<AssignedRequests<P::Message>>,
     S::Response: IntoIterator<Item = AssignedResponse<P::Message>>,
     P: Processor,
     P::Message: Message + Clone,
 {
-    responses: VecDeque<MaybeResponse<S::Response, S::Future>>,
+    responses: VecDeque<S::Future>,
     transport: Batch<T>,
     service: S,
     queue: MessageQueue<P>,
@@ -58,7 +54,7 @@ where
 impl<T, S, P> Pipeline<T, S, P>
 where
     T: Sink<SinkItem = BytesMut> + Stream<Item = P::Message>,
-    S: DirectService<AssignedRequests<P::Message>>,
+    S: Service<AssignedRequests<P::Message>>,
     S::Response: IntoIterator<Item = AssignedResponse<P::Message>>,
     P: Processor,
     P::Message: Message + Clone,
@@ -80,7 +76,7 @@ where
 impl<T, S, P> Future for Pipeline<T, S, P>
 where
     T: Sink<SinkItem = BytesMut> + Stream<Item = P::Message>,
-    S: DirectService<AssignedRequests<P::Message>>,
+    S: Service<AssignedRequests<P::Message>>,
     S::Response: IntoIterator<Item = AssignedResponse<P::Message>>,
     P: Processor,
     P::Message: Message + Clone,
@@ -90,30 +86,20 @@ where
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         loop {
-            // Make sure we're driving the inner service.
-            let _ = self.service.poll_service();
-
             // In order, drive the response futures we're waiting on.  Keep pulling from the
             // front to keep things in order, and as soon as we hit something that isn't ready or
             // isn't ready to flush to the message queue.
-            while let Some(r) = self.responses.pop_front() {
-                match r {
-                    MaybeResponse::Pending(mut f) => {
-                        match f.poll() {
-                            Ok(Async::Ready(rsp)) => {
-                                self.responses.push_front(MaybeResponse::Ready(rsp));
-                            },
-                            Ok(Async::NotReady) => {
-                                self.responses.push_front(MaybeResponse::Pending(f));
-                                break;
-                            },
-                            Err(e) => {
-                                return Err(PipelineError::from_service_error(e));
-                            },
-                        }
+            while let Some(mut f) = self.responses.pop_front() {
+                match f.poll() {
+                    Ok(Async::Ready(rsp)) => {
+                        self.queue.fulfill(rsp);
                     },
-                    MaybeResponse::Ready(batch) => {
-                        self.queue.fulfill(batch);
+                    Ok(Async::NotReady) => {
+                        self.responses.push_front(f);
+                        break;
+                    },
+                    Err(e) => {
+                        return Err(PipelineError::from_service_error(e));
                     },
                 }
             }
@@ -122,7 +108,7 @@ where
             // to send: first, we might be holding on to a buffer we got from the queue that
             // hasn't been sendable, or we might be trying to get a buffer to send period.
             if self.send_buf.is_some() {
-                let (buf, count) = self.send_buf.take().unwrap();
+                let (buf, count) = self.send_buf.take().expect("left over send buffer not available");
                 let buf_len = buf.len();
                 if let AsyncSink::NotReady(buf) =
                     self.transport.start_send(buf).map_err(PipelineError::from_sink_error)?
@@ -135,18 +121,26 @@ where
                 self.sink.update_count("bytes_sent", buf_len as i64);
             }
 
-            if let Some((buf, count)) = self.queue.get_sendable_buf() {
+            let mut msgs_sent = 0;
+            let mut bytes_sent = 0;
+
+            while let Some((buf, count)) = self.queue.get_sendable_buf() {
                 let buf_len = buf.len();
                 if let AsyncSink::NotReady(buf) =
                     self.transport.start_send(buf).map_err(PipelineError::from_sink_error)?
                 {
                     self.send_buf = Some((buf, count));
+                    self.sink.update_count("messages_sent", msgs_sent as i64);
+                    self.sink.update_count("bytes_sent", bytes_sent as i64);
                     return Ok(Async::NotReady);
                 }
 
-                self.sink.update_count("messages_sent", count as i64);
-                self.sink.update_count("bytes_sent", buf_len as i64);
+                msgs_sent += count;
+                bytes_sent += buf_len;
             }
+
+            self.sink.update_count("messages_sent", msgs_sent as i64);
+            self.sink.update_count("bytes_sent", bytes_sent as i64);
 
             // Drive our transport to flush any buffers we have.
             if let Async::Ready(()) = self.transport.poll_complete().map_err(PipelineError::from_sink_error)? {
@@ -167,14 +161,13 @@ where
 
             // See if we can pull a batch from the transport.
             match try_ready!(self.transport.poll().map_err(PipelineError::from_stream_error)) {
-                Some(batch) => {
+                Some((batch, batch_size)) => {
                     self.sink.update_count("messages_received", batch.len() as i64);
-                    let batch_bytes_recv = batch.iter().fold(0, |acc, m| acc + m.size());
-                    self.sink.update_count("bytes_received", batch_bytes_recv as i64);
+                    self.sink.update_count("bytes_received", batch_size as i64);
                     let batch = self.queue.enqueue(batch)?;
                     if !batch.is_empty() {
                         let fut = self.service.call(batch);
-                        self.responses.push_back(MaybeResponse::Pending(fut));
+                        self.responses.push_back(fut);
                     }
                 },
                 None => {

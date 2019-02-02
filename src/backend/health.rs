@@ -17,30 +17,23 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use futures::{future::ok, Future};
-use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
-        Arc,
-    },
-    time::{Duration, Instant},
-};
-use tokio::{timer::Delay, sync::mpsc};
+use futures::{future::ok, task, Future};
+use std::time::{Duration, Instant};
+use tokio::timer::Delay;
 use util::typeless;
 
-pub(crate) struct BackendHealth {
+pub struct BackendHealth {
     cooloff_enabled: bool,
     cooloff_period_ms: u64,
     error_limit: usize,
-    error_count: Arc<AtomicUsize>,
-    in_cooloff: Arc<AtomicBool>,
-    updates_tx: mpsc::UnboundedSender<()>,
+    error_count: usize,
+    in_cooloff: bool,
+    epoch: u64,
+    cooloff_done_at: Instant,
 }
 
 impl BackendHealth {
-    pub fn new(
-        cooloff_enabled: bool, cooloff_period_ms: u64, error_limit: usize, updates_tx: mpsc::UnboundedSender<()>,
-    ) -> BackendHealth {
+    pub fn new(cooloff_enabled: bool, cooloff_period_ms: u64, error_limit: usize) -> BackendHealth {
         debug!(
             "[backend health] cooloff enabled: {}, cooloff period (ms): {}, error limit: {}",
             cooloff_enabled, cooloff_period_ms, error_limit
@@ -50,53 +43,58 @@ impl BackendHealth {
             cooloff_enabled,
             cooloff_period_ms,
             error_limit,
-            error_count: Arc::new(AtomicUsize::new(0)),
-            in_cooloff: Arc::new(AtomicBool::new(false)),
-            updates_tx,
+            error_count: 0,
+            in_cooloff: false,
+            epoch: 0,
+            cooloff_done_at: Instant::now(),
         }
     }
 
-    pub fn is_healthy(&self) -> bool { !self.cooloff_enabled || !self.in_cooloff.load(SeqCst) }
+    pub fn is_healthy(&mut self) -> bool {
+        if !self.cooloff_enabled || !self.in_cooloff {
+            return true;
+        }
 
-    pub fn increment_error(&self) {
+        if self.cooloff_done_at < Instant::now() {
+            self.error_count = 0;
+            self.in_cooloff = false;
+            self.epoch += 1;
+
+            return true;
+        }
+
+        false
+    }
+
+    pub fn epoch(&self) -> u64 { self.epoch }
+
+    pub fn increment_error(&mut self) {
         if !self.cooloff_enabled {
             return;
         }
 
-        let mut final_error_count;
-        loop {
-            // Keep looping until we increment the counter.
-            let curr_count = self.error_count.load(SeqCst);
-            final_error_count = curr_count + 1;
-            if self.error_count.compare_and_swap(curr_count, final_error_count, SeqCst) == curr_count {
-                break;
-            }
-        }
+        self.error_count += 1;
 
-        // If we're over the error threshold, put us into cooloff.  Someone else may have beaten us
-        // to the punch, so just check first.
-        if final_error_count >= self.error_limit {
+        // If we're over the error threshold, put ourselves into cooloff.
+        if self.error_count >= self.error_limit && !self.in_cooloff {
             debug!("[health] error count over limit, setting cooloff");
-            let cooloff = self.in_cooloff.load(SeqCst);
-            if !cooloff && !self.in_cooloff.compare_and_swap(false, true, SeqCst) {
-                // If we're here, we weren't in cooloff _and_ nobody else was contending us.  Set
-                // up the cooloff check task.
-                debug!("[health] firing cooloff check");
-                self.fire_cooloff_check();
-            }
+            self.in_cooloff = true;
+            self.epoch += 1;
+            self.fire_cooloff_check();
         }
     }
 
-    fn fire_cooloff_check(&self) {
-        let in_cooloff = self.in_cooloff.clone();
-        let error_count = self.error_count.clone();
-        let mut updates_tx = self.updates_tx.clone();
+    fn fire_cooloff_check(&mut self) {
+        // Mark when our cooloff period should be lifted, and trigger a task notification to fire
+        // once that deadline has passed: our health will be checked, and thus we can reenable
+        // ourselves.
         let deadline = Instant::now() + Duration::from_millis(self.cooloff_period_ms);
+        self.cooloff_done_at = deadline;
+
+        let this = task::current();
         let delay = Delay::new(deadline).then(move |_| {
             debug!("[health] resetting cooloff");
-            in_cooloff.store(false, SeqCst);
-            error_count.store(0, SeqCst);
-            let _ = updates_tx.try_send(());
+            this.notify();
             ok::<_, ()>(())
         });
 

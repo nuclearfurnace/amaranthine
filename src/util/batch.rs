@@ -17,6 +17,7 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
+use super::Sizable;
 use futures::{prelude::*, stream::Fuse};
 use std::mem;
 
@@ -26,15 +27,15 @@ use std::mem;
 /// underlying stream reports that it is not ready.  Any items returned during this loop will be
 /// stored and forwarded on either when the batch capacity is met or when the underlying stream
 /// signals that it has no available items.
-///
-/// Batches items to match the `OrderedMessages` type.
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct Batch<S>
 where
     S: Stream,
+    S::Item: Sizable,
 {
     items: Vec<S::Item>,
+    size: usize,
     err: Option<S::Error>,
     stream: Fuse<S>,
 }
@@ -42,29 +43,35 @@ where
 impl<S> Batch<S>
 where
     S: Stream,
+    S::Item: Sizable,
 {
     pub fn new(s: S, capacity: usize) -> Batch<S> {
         assert!(capacity > 0);
 
         Batch {
             items: Vec::with_capacity(capacity),
+            size: 0,
             err: None,
             stream: s.fuse(),
         }
     }
 
-    fn take(&mut self) -> Vec<S::Item> {
+    fn take(&mut self) -> (Vec<S::Item>, usize) {
         let cap = self.items.capacity();
-        mem::replace(&mut self.items, Vec::with_capacity(cap))
+        let items = mem::replace(&mut self.items, Vec::with_capacity(cap));
+        let size = mem::replace(&mut self.size, 0);
+
+        (items, size)
     }
 }
 
 impl<S> Stream for Batch<S>
 where
     S: Stream,
+    S::Item: Sizable,
 {
     type Error = S::Error;
-    type Item = Vec<S::Item>;
+    type Item = (Vec<S::Item>, usize);
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         if let Some(err) = self.err.take() {
@@ -82,7 +89,7 @@ where
                         Ok(Async::NotReady)
                     } else {
                         Ok(Some(self.take()).into())
-                    }
+                    };
                 },
 
                 // If the underlying stream is ready and has items, buffer them until we hit our
@@ -92,7 +99,9 @@ where
                 // possible item available to us at the time of a given `poll`, maximixing the
                 // batching effect.
                 Ok(Async::Ready(Some(item))) => {
+                    let size = item.size();
                     self.items.push(item);
+                    self.size += size;
                     if self.items.len() >= cap {
                         return Ok(Some(self.take()).into());
                     }
@@ -105,7 +114,7 @@ where
                         Ok(Some(self.take()).into())
                     } else {
                         Ok(Async::Ready(None))
-                    }
+                    };
                 },
 
                 // If we've got buffered items be sure to return them first, we'll defer our error
@@ -126,6 +135,7 @@ where
 impl<S> Sink for Batch<S>
 where
     S: Sink + Stream,
+    <S as Stream>::Item: Sizable,
 {
     type SinkError = S::SinkError;
     type SinkItem = S::SinkItem;

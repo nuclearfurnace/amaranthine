@@ -17,106 +17,45 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::{pool::BackendPool, processor::Processor};
-use common::{AssignedRequests, AssignedResponses, EnqueuedRequest, Message, PendingResponse};
-use futures::{
-    future::{join_all, JoinAll},
-    prelude::*,
-};
-use routing::RouterError;
-use service::DirectService;
-use std::{collections::HashMap, sync::Arc};
+use backend::processor::Processor;
+use common::{AssignedRequests, EnqueuedRequest, EnqueuedRequests, Message};
+use futures::prelude::*;
+use tower_service::Service;
 
 #[derive(Clone)]
-pub struct FixedRouter<P>
+pub struct FixedRouter<P, S>
 where
     P: Processor + Clone + Send + 'static,
     P::Message: Message + Send,
+    S: Service<EnqueuedRequests<P::Message>> + Clone,
 {
     processor: P,
-    pool: Arc<BackendPool<P>>,
+    inner: S,
 }
 
-impl<P> FixedRouter<P>
+impl<P, S> FixedRouter<P, S>
 where
     P: Processor + Clone + Send + 'static,
     P::Message: Message + Send,
+    S: Service<EnqueuedRequests<P::Message>> + Clone,
 {
-    pub fn new(processor: P, pool: Arc<BackendPool<P>>) -> FixedRouter<P> { FixedRouter { processor, pool } }
+    pub fn new(processor: P, inner: S) -> FixedRouter<P, S> { FixedRouter { processor, inner } }
 }
 
-impl<P> DirectService<AssignedRequests<P::Message>> for FixedRouter<P>
+impl<P, S> Service<AssignedRequests<P::Message>> for FixedRouter<P, S>
 where
     P: Processor + Clone + Send + 'static,
     P::Message: Message + Send,
+    S: Service<EnqueuedRequests<P::Message>> + Clone,
 {
-    type Error = RouterError;
-    type Future = FixedResponseFuture<P>;
-    type Response = AssignedResponses<P::Message>;
+    type Error = S::Error;
+    type Future = S::Future;
+    type Response = S::Response;
 
-    fn poll_ready(&mut self) -> Poll<(), Self::Error> { Ok(Async::Ready(())) }
-
-    fn poll_service(&mut self) -> Poll<(), Self::Error> { Ok(Async::Ready(())) }
-
-    fn poll_close(&mut self) -> Poll<(), Self::Error> { Ok(Async::Ready(())) }
+    fn poll_ready(&mut self) -> Poll<(), Self::Error> { self.inner.poll_ready() }
 
     fn call(&mut self, req: AssignedRequests<P::Message>) -> Self::Future {
-        let mut futs = Vec::new();
-        let mut batches = HashMap::new();
-
-        // Split all the messages out into backend/associated-keys groupings.
-        for (id, msg) in req {
-            let backend_idx = {
-                let msg_key = msg.key();
-                self.pool.get_backend_index(msg_key)
-            };
-
-            let (rx, wrapped) = EnqueuedRequest::new(id, msg);
-            let batch = batches.entry(backend_idx).or_insert_with(Vec::new);
-            batch.push(wrapped);
-            futs.push(rx);
-        }
-
-        // At this point, we've batched up all messages according to which backend they should go.
-        // Now we need to actually submit these batches to their respective backends, and we're
-        // done! The backends will respond to the client's message queue as results come back.
-        for (backend_idx, batch) in batches {
-            let backend = self.pool.get_backend_by_index(backend_idx);
-            backend.submit(batch);
-        }
-
-        FixedResponseFuture::new(futs)
-    }
-}
-
-pub struct FixedResponseFuture<P>
-where
-    P: Processor,
-{
-    responses: JoinAll<Vec<PendingResponse<P::Message>>>,
-}
-
-impl<P> FixedResponseFuture<P>
-where
-    P: Processor,
-{
-    fn new(responses: Vec<PendingResponse<P::Message>>) -> FixedResponseFuture<P> {
-        FixedResponseFuture {
-            responses: join_all(responses),
-        }
-    }
-}
-
-impl<P> Future for FixedResponseFuture<P>
-where
-    P: Processor,
-{
-    type Error = RouterError;
-    type Item = AssignedResponses<P::Message>;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        self.responses
-            .poll()
-            .map_err(|_| RouterError::BadResponse("response receiver dropped!".to_owned()))
+        let transformed = req.into_iter().map(|(id, msg)| EnqueuedRequest::new(id, msg)).collect();
+        self.inner.call(transformed)
     }
 }

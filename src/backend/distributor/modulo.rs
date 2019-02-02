@@ -22,17 +22,26 @@ use super::{BackendDescriptor, Distributor};
 /// Provides a modulo'd distribution of requests.
 pub struct ModuloDistributor {
     backend_count: usize,
+    backends: Vec<BackendDescriptor>,
 }
 
 impl ModuloDistributor {
-    pub fn new() -> ModuloDistributor { ModuloDistributor { backend_count: 0 } }
+    pub fn new() -> ModuloDistributor {
+        ModuloDistributor {
+            backend_count: 0,
+            backends: Vec::new(),
+        }
+    }
 }
 
 impl Distributor for ModuloDistributor {
-    fn seed(&mut self, backends: Vec<BackendDescriptor>) {
-        debug!("seeding modulo distributor with {} backends", backends.len());
-        self.backend_count = backends.len();
+    fn update(&mut self, backends: Vec<BackendDescriptor>) {
+        self.backends = backends;
+        self.backend_count = self.backends.len();
     }
 
-    fn choose(&self, point: u64) -> usize { (point % self.backend_count as u64) as usize }
+    fn choose(&self, point: u64) -> usize {
+        let idx = point as usize % self.backend_count;
+        self.backends[idx].idx
+    }
 }

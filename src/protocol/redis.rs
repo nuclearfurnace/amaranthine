@@ -24,6 +24,7 @@ use futures::prelude::*;
 use itoa;
 use protocol::errors::ProtocolError;
 use tokio::io::{write_all, AsyncRead, AsyncWrite, Error, ErrorKind};
+use util::Sizable;
 
 const MAX_OUTSTANDING_WBUF: usize = 8192;
 
@@ -197,6 +198,22 @@ impl RedisMessage {
     }
 }
 
+impl Sizable for RedisMessage {
+    fn size(&self) -> usize {
+        match self {
+            RedisMessage::Null => REDIS_NULL_BUF[..].len(),
+            RedisMessage::OK => REDIS_OK_BUF[..].len(),
+            RedisMessage::Ping => REDIS_PING_RESP_BUF[..].len(),
+            RedisMessage::Quit => REDIS_OK_BUF[..].len(),
+            RedisMessage::Status(ref buf, _) => buf.len(),
+            RedisMessage::Error(ref buf, _) => buf.len(),
+            RedisMessage::Integer(ref buf, _) => buf.len(),
+            RedisMessage::Data(ref buf, _) => buf.len(),
+            RedisMessage::Bulk(ref buf, _) => buf.len(),
+        }
+    }
+}
+
 impl Message for RedisMessage {
     fn key(&self) -> &[u8] {
         match self {
@@ -226,20 +243,6 @@ impl Message for RedisMessage {
             RedisMessage::Data(_, _) => false,
             RedisMessage::Bulk(_, _) => false,
             _ => true,
-        }
-    }
-
-    fn size(&self) -> usize {
-        match self {
-            RedisMessage::Null => REDIS_NULL_BUF[..].len(),
-            RedisMessage::OK => REDIS_OK_BUF[..].len(),
-            RedisMessage::Ping => REDIS_PING_RESP_BUF[..].len(),
-            RedisMessage::Quit => REDIS_OK_BUF[..].len(),
-            RedisMessage::Status(ref buf, _) => buf.len(),
-            RedisMessage::Error(ref buf, _) => buf.len(),
-            RedisMessage::Integer(ref buf, _) => buf.len(),
-            RedisMessage::Data(ref buf, _) => buf.len(),
-            RedisMessage::Bulk(ref buf, _) => buf.len(),
         }
     }
 
@@ -396,7 +399,7 @@ where
                     trace!("[protocol] got message from server! ({} bytes)", bytes_read);
 
                     let mut qmsg = self.msgs.remove(0);
-                    qmsg.fulfill(msg);
+                    qmsg.fulfill(msg)
                 },
                 Err(e) => return Err(e),
                 _ => {

@@ -19,19 +19,20 @@
 // SOFTWARE.
 #![feature(test)]
 #![feature(nll)]
+#![feature(never_type)]
 #![recursion_limit = "1024"]
+#![deny(unused_extern_crates)]
 
 #[macro_use]
 extern crate lazy_static;
 
 #[macro_use]
-extern crate crossbeam;
-extern crate parking_lot;
+extern crate derivative;
+
 extern crate warp;
 
 extern crate config;
 extern crate crypto;
-extern crate fnv;
 extern crate pruefung;
 #[macro_use]
 extern crate serde_derive;
@@ -41,8 +42,11 @@ extern crate libc;
 extern crate signal_hook;
 
 extern crate tokio;
-extern crate tokio_io;
+extern crate tokio_executor;
 extern crate tokio_io_pool;
+extern crate tower_buffer;
+extern crate tower_direct_service;
+extern crate tower_service;
 #[macro_use]
 extern crate futures;
 extern crate futures_turnstyle;
@@ -54,7 +58,7 @@ use signal_hook::iterator::Signals;
 use std::thread;
 use tokio::{
     prelude::*,
-    sync::{mpsc, oneshot}
+    sync::{mpsc, oneshot},
 };
 
 #[macro_use]

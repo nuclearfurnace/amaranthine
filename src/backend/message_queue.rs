@@ -111,9 +111,9 @@ where
                 match self.slots.get(*slot_id) {
                     Some(_) => {
                         match state {
-                            MessageState::Standalone | MessageState::Inline | MessageState::StreamingFragmented(_, _) => {
-                                true
-                            },
+                            MessageState::Standalone
+                            | MessageState::Inline
+                            | MessageState::StreamingFragmented(_, _) => true,
                             MessageState::Fragmented(_, _, _) => false,
                         }
                     },
@@ -123,8 +123,8 @@ where
         };
 
         if has_immediate {
-            let (slot_id, state) = self.slot_order.pop_front().unwrap();
-            let slot = self.slots.remove(slot_id).unwrap();
+            let (slot_id, state) = self.slot_order.pop_front().expect("failed to pop slot order");
+            let slot = self.slots.remove(slot_id).expect("failed to remove slot");
 
             let (buf, count) = match state {
                 MessageState::Standalone | MessageState::Inline => (slot.into_buf(), 1),
@@ -166,9 +166,9 @@ where
         // We have all the slots filled and ready to coalesce.  Pull out the fragments!
         let mut fragments = Vec::new();
         for _ in 0..fragment_count {
-            let (slot_id, state) = self.slot_order.pop_front().unwrap();
-            let msg = self.slots.remove(slot_id);
-            fragments.push((state, msg.unwrap()));
+            let (slot_id, state) = self.slot_order.pop_front().expect("failed to pop fragment slot order");
+            let msg = self.slots.remove(slot_id).expect("failed to remove fragment slot");
+            fragments.push((state, msg));
         }
 
         let msg = self.processor.defragment_messages(fragments)?;
@@ -216,19 +216,10 @@ where
             return None;
         }
 
-        let mut mbuf = BytesMut::new();
-        let mut mcount = 0;
-        loop {
-            let resp = self.get_next_response();
-            match resp {
-                Ok(Some((buf, count))) => {
-                    mcount += count;
-                    mbuf.unsplit(buf);
-                },
-                _ => break,
-            }
+        if let Ok(inner) = self.get_next_response() {
+            inner
+        } else {
+            None
         }
-
-        Some((mbuf, mcount))
     }
 }

@@ -20,26 +20,4 @@
 mod errors;
 mod pipeline;
 
-use futures::prelude::*;
-
 pub use self::{errors::PipelineError, pipeline::Pipeline};
-
-pub trait Service<Request> {
-    type Response;
-    type Error;
-    type Future: Future<Item = Self::Response, Error = Self::Error>;
-
-    fn poll_ready(&mut self) -> Poll<(), Self::Error>;
-    fn call(&mut self, req: Request) -> Self::Future;
-}
-
-pub trait DirectService<Request> {
-    type Response;
-    type Error;
-    type Future: Future<Item = Self::Response, Error = Self::Error>;
-
-    fn poll_ready(&mut self) -> Poll<(), Self::Error>;
-    fn poll_service(&mut self) -> Poll<(), Self::Error>;
-    fn poll_close(&mut self) -> Poll<(), Self::Error>;
-    fn call(&mut self, req: Request) -> Self::Future;
-}

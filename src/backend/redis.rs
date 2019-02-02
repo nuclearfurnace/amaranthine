@@ -87,13 +87,6 @@ impl Processor for RedisProcessor {
             .and_then(move |(server, _n)| ok(server));
         ProcessFuture::new(inner)
     }
-
-    fn process_noreply(&self, req: EnqueuedRequests<Self::Message>, stream: TcpStreamFuture) -> ProcessFuture {
-        let inner = stream
-            .and_then(move |server| redis::write_messages(server, req))
-            .and_then(move |(server, _msgs, _n)| ok(server));
-        ProcessFuture::new(inner)
-    }
 }
 
 fn redis_fragment_messages(msgs: Vec<RedisMessage>) -> Result<Vec<(MessageState, RedisMessage)>, ProcessorError> {
@@ -125,14 +118,14 @@ fn redis_fragment_messages(msgs: Vec<RedisMessage>) -> Result<Vec<(MessageState,
                                     return Err(ProcessorError::FragmentError(format!(
                                         "tried to fragment command '{:?}' but command is not fragmentable!",
                                         x
-                                    )))
+                                    )));
                                 },
                             }
                         },
                         None => {
                             return Err(ProcessorError::FragmentError(
                                 "tried to fragment bulk message with non-data argument in position 0!".to_owned(),
-                            ))
+                            ));
                         },
                     };
 
@@ -216,7 +209,7 @@ fn redis_defragment_messages(fragments: Vec<(MessageState, RedisMessage)>) -> Re
         _ => {
             return Err(ProcessorError::DefragmentError(
                 "tried to defragment messages, but got non-fragmented message in list".to_owned(),
-            ))
+            ));
         },
     };
 
@@ -232,7 +225,7 @@ fn redis_defragment_messages(fragments: Vec<(MessageState, RedisMessage)>) -> Re
                     _ => {
                         return Err(ProcessorError::DefragmentError(
                             "non-integer response for DEL!".to_owned(),
-                        ))
+                        ));
                     },
                 }
             }

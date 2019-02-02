@@ -21,7 +21,7 @@ mod errors;
 pub use self::errors::ProcessorError;
 
 use backend::message_queue::MessageState;
-use common::EnqueuedRequests;
+use common::{EnqueuedRequests, Message};
 use futures::future::{Either, FutureResult};
 use protocol::errors::ProtocolError;
 use std::{error::Error, net::SocketAddr};
@@ -32,7 +32,10 @@ use util::ProcessFuture;
 pub type TcpStreamFuture = Either<FutureResult<TcpStream, ProtocolError>, ProcessFuture>;
 
 /// Cache-specific logic for processing requests and interacting with backends.
-pub trait Processor {
+pub trait Processor
+where
+    Self::Message: Message + Clone,
+{
     type Message;
     type Transport;
 
@@ -66,10 +69,4 @@ pub trait Processor {
     /// Processes a batch of requests, running the necessary operations against the given TCP
     /// stream.
     fn process(&self, EnqueuedRequests<Self::Message>, TcpStreamFuture) -> ProcessFuture;
-
-    /// Processes a batch of requests, running the necessary operations against the given TCP
-    /// stream, without waiting for a response.
-    ///
-    /// This is useful for traffic shadowing, etc.
-    fn process_noreply(&self, EnqueuedRequests<Self::Message>, TcpStreamFuture) -> ProcessFuture;
 }

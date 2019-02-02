@@ -1,6 +1,6 @@
 {
   "logging": {
-    "level": "info"
+    "level": "debug"
   },
   "listeners": {
     "fixed": {
@@ -32,10 +32,10 @@
       "address": "127.0.0.1:6384",
       "pools": {
         "default": {
-          "addresses": ["127.0.0.1:6385", "127.0.0.1:6386"]
+          "addresses": ["127.0.0.1:6385"]
         },
         "shadow": {
-          "addresses": ["127.0.0.1:6387"]
+          "addresses": ["127.0.0.1:6386"]
         }
       },
       "routing": {

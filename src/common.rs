@@ -19,11 +19,11 @@
 // SOFTWARE.
 use bytes::BytesMut;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
+use util::Sizable;
 
-pub trait Message {
+pub trait Message: Sizable {
     fn key(&self) -> &[u8];
     fn is_inline(&self) -> bool;
-    fn size(&self) -> usize;
     fn into_buf(self) -> BytesMut;
 }
 
@@ -38,61 +38,88 @@ pub enum MessageResponse<T> {
     Complete(T),
 }
 
-// Core types.  These define the transformation between raw messages that come in over
-// the transport and the interstitial types as they're batched, fragmented, etc.
+// Core types.
+//
+// These define the transformation between raw messages that come in over the transport and the
+// interstitial types as they're batched, fragmented, etc.
 pub type AssignedRequest<T> = (usize, T);
 pub type AssignedResponse<T> = (usize, MessageResponse<T>);
 pub type AssignedRequests<T> = Vec<AssignedRequest<T>>;
 pub type AssignedResponses<T> = Vec<AssignedResponse<T>>;
 
 pub type PendingResponse<T> = Receiver<AssignedResponse<T>>;
+pub type PendingResponses<T> = Vec<PendingResponse<T>>;
 pub type EnqueuedRequests<T> = Vec<EnqueuedRequest<T>>;
 
-pub struct EnqueuedRequest<T> {
+pub struct EnqueuedRequest<T: Clone + Message> {
     id: usize,
     request: Option<T>,
+    has_response: bool,
     done: bool,
     tx: Option<Sender<AssignedResponse<T>>>,
 }
 
-impl<T> EnqueuedRequest<T> {
-    pub fn new(id: usize, request: T) -> (PendingResponse<T>, EnqueuedRequest<T>) {
-        let (tx, rx) = channel();
-        let er = EnqueuedRequest {
+impl<T: Clone + Message> EnqueuedRequest<T> {
+    pub fn new(id: usize, request: T) -> EnqueuedRequest<T> {
+        EnqueuedRequest {
             id,
             request: Some(request),
-            tx: Some(tx),
+            tx: None,
+            has_response: true,
             done: false,
-        };
-
-        (rx, er)
+        }
     }
 
-    pub fn with_noop(request: T) -> EnqueuedRequest<T> {
+    pub fn without_response(request: T) -> EnqueuedRequest<T> {
         EnqueuedRequest {
             id: 0,
             request: Some(request),
             tx: None,
+            has_response: false,
             done: true,
         }
+    }
+
+    pub fn key(&self) -> &[u8] {
+        // Pass-through for `Message::key` because we really don't want to expose the
+        // entire Message trait over ourselves, as one of the methods allows taking
+        // the request by consuming self.
+        self.request.as_ref().expect("tried to get key for empty request").key()
     }
 
     pub fn consume(&mut self) -> T { self.request.take().unwrap() }
 
     pub fn fulfill(&mut self, response: T) {
-        if !self.done {
-            let _ = self
-                .tx
-                .take()
-                .unwrap()
-                .send((self.id, MessageResponse::Complete(response)));
-            self.done = true;
+        if self.done {
+            return;
         }
+
+        let _ = self
+            .tx
+            .take()
+            .expect("tried to send response to uninitialized receiver")
+            .send((self.id, MessageResponse::Complete(response)));
+        self.done = true;
+    }
+
+    pub fn get_response_rx(&mut self) -> Option<PendingResponse<T>> {
+        if self.has_response {
+            let (tx, rx) = channel();
+            self.tx = Some(tx);
+            self.done = false;
+            self.has_response = false;
+
+            return Some(rx);
+        }
+
+        None
     }
 }
 
-impl<T> Drop for EnqueuedRequest<T> {
+impl<T: Clone + Message> Drop for EnqueuedRequest<T> {
     fn drop(&mut self) {
+        // The drop guard is used to make sure we always send back a response to the upper
+        // layers even if a backend has an error that kills an entire batch of requests.
         if !self.done {
             let _ = self.tx.take().unwrap().send((self.id, MessageResponse::Failed));
         }

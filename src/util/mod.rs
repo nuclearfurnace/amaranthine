@@ -25,8 +25,8 @@ pub use self::batch::Batch;
 mod helpers;
 pub use self::helpers::ProcessFuture;
 
-mod work_queue;
-pub use self::work_queue::{WorkQueue, Worker};
+mod container;
+pub use self::container::IntegerMappedVec;
 
 impl<T: ?Sized> StreamExt for T where T: Stream {}
 
@@ -48,6 +48,7 @@ pub trait StreamExt: Stream {
     fn batch(self, capacity: usize) -> batch::Batch<Self>
     where
         Self: Sized,
+        Self::Item: Sizable,
     {
         batch::Batch::new(self, capacity)
     }
@@ -58,4 +59,8 @@ where
     F: Future,
 {
     f.map(|_| ()).map_err(|_| ())
+}
+
+pub trait Sizable {
+    fn size(&self) -> usize;
 }

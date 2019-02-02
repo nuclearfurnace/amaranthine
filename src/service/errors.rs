@@ -19,14 +19,14 @@
 // SOFTWARE.
 use backend::processor::ProcessorError;
 use futures::prelude::*;
-use service::DirectService;
 use std::fmt;
+use tower_service::Service;
 
 /// Error type for `Pipeline`.
 pub enum PipelineError<T, S, R>
 where
     T: Sink + Stream,
-    S: DirectService<R>,
+    S: Service<R>,
 {
     /// The underlying transport failed to produce a request.
     TransportReceive(<T as Stream>::Error),
@@ -43,8 +43,8 @@ where
     T: Sink + Stream,
     <T as Sink>::SinkError: fmt::Display,
     <T as Stream>::Error: fmt::Display,
-    S: DirectService<R>,
-    <S as DirectService<R>>::Error: fmt::Display,
+    S: Service<R>,
+    <S as Service<R>>::Error: fmt::Display,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
@@ -60,8 +60,8 @@ where
     T: Sink + Stream,
     <T as Sink>::SinkError: fmt::Debug,
     <T as Stream>::Error: fmt::Debug,
-    S: DirectService<R>,
-    <S as DirectService<R>>::Error: fmt::Debug,
+    S: Service<R>,
+    <S as Service<R>>::Error: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
@@ -75,19 +75,19 @@ where
 impl<T, S, R> PipelineError<T, S, R>
 where
     T: Sink + Stream,
-    S: DirectService<R>,
+    S: Service<R>,
 {
     pub fn from_sink_error(e: <T as Sink>::SinkError) -> Self { PipelineError::TransportSend(e) }
 
     pub fn from_stream_error(e: <T as Stream>::Error) -> Self { PipelineError::TransportReceive(e) }
 
-    pub fn from_service_error(e: <S as DirectService<R>>::Error) -> Self { PipelineError::Service(e) }
+    pub fn from_service_error(e: <S as Service<R>>::Error) -> Self { PipelineError::Service(e) }
 }
 
 impl<T, S, R> From<ProcessorError> for PipelineError<T, S, R>
 where
     T: Sink + Stream,
-    S: DirectService<R>,
+    S: Service<R>,
 {
     fn from(e: ProcessorError) -> PipelineError<T, S, R> { e.into() }
 }

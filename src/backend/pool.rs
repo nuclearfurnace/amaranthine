@@ -17,113 +17,180 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use super::{distributor, hasher};
-use backend::{processor::Processor, Backend};
+use super::{
+    distributor::{configure_distributor, Distributor},
+    hasher::{configure_hasher, KeyHasher},
+};
+use backend::{processor::Processor, Backend, BackendError, PoolError, ResponseFuture};
+use common::{AssignedResponses, EnqueuedRequests, Message};
 use conf::PoolConfiguration;
 use errors::CreationError;
-use futures::prelude::*;
-use parking_lot::RwLock;
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::mpsc;
+use futures::{
+    future::{join_all, JoinAll},
+    prelude::*,
+};
 use hotmic::Sink as MetricSink;
+use std::{collections::HashMap, marker::PhantomData};
+use tower_direct_service::DirectService;
+use util::IntegerMappedVec;
+
+type DistributorFutureSafe = Box<Distributor + Send + 'static>;
+type KeyHasherFutureSafe = Box<KeyHasher + Send + 'static>;
 
 pub struct BackendPool<P>
 where
     P: Processor + Clone + Send + 'static,
-    P::Message: Send,
+    P::Message: Message + Send + 'static,
 {
-    distributor: RwLock<Box<distributor::Distributor + Send + Sync>>,
-    hasher: Box<hasher::KeyHasher + Send + Sync>,
+    distributor: DistributorFutureSafe,
+    key_hasher: KeyHasherFutureSafe,
     backends: Vec<Backend<P>>,
-    sink: MetricSink<&'static str>,
-}
-
-pub struct BackendPoolSupervisor<P, C>
-where
-    P: Processor + Clone + Send + 'static,
-    P::Message: Send,
-    C: Future + Send + 'static,
-{
-    pool: Arc<BackendPool<P>>,
-    updates_rx: mpsc::UnboundedReceiver<()>,
-    close: C,
-}
-
-pub struct BackendPoolBuilder<P, C>
-where
-    P: Processor + Clone + Send + 'static,
-    P::Message: Send,
-    C: Future + Send + 'static,
-{
-    processor: P,
-    close: C,
-    config: PoolConfiguration,
     noreply: bool,
+    epoch: u64,
     sink: MetricSink<&'static str>,
 }
 
 impl<P> BackendPool<P>
 where
     P: Processor + Clone + Send + 'static,
-    P::Message: Send,
+    P::Message: Message + Send + 'static,
 {
-    pub fn update_distributor(&self) {
-        trace!("[backend pool] distributor update triggered");
+    pub fn new(
+        backends: Vec<Backend<P>>, distributor: DistributorFutureSafe, key_hasher: KeyHasherFutureSafe, noreply: bool,
+        sink: MetricSink<&'static str>,
+    ) -> BackendPool<P> {
+        let mut pool = BackendPool {
+            distributor,
+            key_hasher,
+            backends,
+            noreply,
+            epoch: 0,
+            sink,
+        };
+        pool.regenerate_distribution();
+        pool
+    }
 
-        // Tally up the healthy backends.
-        let mut healthy_backends = vec![];
-        for backend in &self.backends {
-            if backend.is_healthy() {
-                healthy_backends.push(backend.get_descriptor());
+    pub fn regenerate_distribution(&mut self) {
+        let descriptors = self
+            .backends
+            .iter_mut()
+            .enumerate()
+            .map(|(idx, backend)| {
+                let mut descriptor = backend.get_descriptor();
+                descriptor.idx = idx;
+                descriptor
+            })
+            .filter(|backend| backend.healthy)
+            .collect();
+        self.distributor.update(descriptors);
+    }
+}
+
+impl<P> DirectService<EnqueuedRequests<P::Message>> for BackendPool<P>
+where
+    P: Processor + Clone + Send + 'static,
+    P::Message: Message + Send + 'static,
+{
+    type Error = PoolError;
+    type Future = PoolResponse<P>;
+    type Response = AssignedResponses<P::Message>;
+
+    fn poll_ready(&mut self) -> Poll<(), Self::Error> {
+        // Not every backend will be ready all the time, especially if they're knocked out of the
+        // pool temporarily, but as long as one is ready, then we're ready.  If any of them are in
+        // a bad enough state to throw an error, though, then something is very wrong and we need
+        // to bubble that up.
+        let mut any_ready = false;
+        let mut epoch = 0;
+        for backend in &mut self.backends {
+            match backend.poll_ready() {
+                Ok(Async::Ready(_)) => any_ready = true,
+                Ok(Async::NotReady) => {},
+                Err(e) => return Err(PoolError::Backend(e)),
             }
+
+            epoch += backend.health().epoch();
         }
 
-        let total_backends_count = self.backends.len() as u64;
-        let healthy_backends_count = healthy_backends.len() as u64;
-        self.sink.update_gauge("total_backends", total_backends_count);
-        self.sink.update_gauge("healthy_backends", healthy_backends_count);
-
-        // Create a new distributor via seeding and set it.
-        let mut distributor = self.distributor.write();
-        distributor.seed(healthy_backends);
-    }
-
-    pub fn get_backend_index(&self, key: &[u8]) -> usize {
-        let key_id = self.hasher.hash(key);
-        let distributor = self.distributor.read();
-        distributor.choose(key_id)
-    }
-
-    pub fn get_backend_by_index(&self, idx: usize) -> &Backend<P> {
-        match self.backends.get(idx) {
-            Some(backend) => backend,
-            None => unreachable!("incorrect backend idx"),
+        if !any_ready {
+            return Ok(Async::NotReady);
         }
+
+        if self.epoch != epoch {
+            debug!("regenerating distribution");
+            self.regenerate_distribution();
+            self.epoch = epoch;
+        }
+
+        Ok(Async::Ready(()))
+    }
+
+    fn poll_service(&mut self) -> Poll<(), Self::Error> {
+        for backend in &mut self.backends {
+            // not clear if it actually makes sense to pre-emptively return notready without
+            // driving all services.. poll_ready should cover the "am i knocked out of the pool
+            // temporarily?" case but would this ever actually return notready when driving the
+            // underlying service? unclear
+            try_ready!(backend.poll_service());
+        }
+
+        Ok(Async::Ready(()))
+    }
+
+    fn poll_close(&mut self) -> Poll<(), Self::Error> {
+        for backend in &mut self.backends {
+            try_ready!(backend.poll_close());
+        }
+
+        Ok(Async::Ready(()))
+    }
+
+    fn call(&mut self, req: EnqueuedRequests<P::Message>) -> Self::Future {
+        let mut futs = Vec::new();
+        let mut batches = IntegerMappedVec::new();
+
+        for msg in req {
+            let msg_key = msg.key();
+            let msg_hashed = self.key_hasher.hash(msg_key);
+            let backend_idx = self.distributor.choose(msg_hashed);
+
+            batches.push(backend_idx, msg);
+        }
+
+        // make the batch calls to each relevant backend, and collect them
+        for (backend_idx, batch) in batches {
+            let fut = self.backends[backend_idx].call(batch);
+            futs.push(fut);
+        }
+
+        PoolResponse::new(futs)
     }
 }
 
-impl<P> Drop for BackendPool<P>
+pub struct BackendPoolBuilder<P>
 where
     P: Processor + Clone + Send + 'static,
-    P::Message: Send,
+    P::Message: Message + Send + 'static,
 {
-    fn drop(&mut self) {
-        trace!("[backend pool] dropping");
-    }
+    processor: P,
+    config: PoolConfiguration,
+    noreply: bool,
+    sink: MetricSink<&'static str>,
 }
 
-impl<P, C> BackendPoolBuilder<P, C>
+impl<P> BackendPoolBuilder<P>
 where
     P: Processor + Clone + Send + 'static,
-    P::Message: Send,
-    C: Future + Clone + Send + 'static,
+    P::Message: Message + Send + 'static,
 {
-    pub fn new(name: String, processor: P, close: C, config: PoolConfiguration, sink: MetricSink<&'static str>) -> BackendPoolBuilder<P, C> {
+    pub fn new(
+        name: String, processor: P, config: PoolConfiguration, sink: MetricSink<&'static str>,
+    ) -> BackendPoolBuilder<P> {
         let sink = sink.scoped(&["pools", &name]);
 
         BackendPoolBuilder {
             processor,
-            close,
             config,
             noreply: false,
             sink,
@@ -135,117 +202,80 @@ where
         self
     }
 
-    pub fn build(self) -> Result<Arc<BackendPool<P>>, CreationError>
+    pub fn build(self) -> Result<BackendPool<P>, CreationError>
     where
         P: Processor + Clone + Send + 'static,
-        P::Message: Send,
-        C: Future + Clone + Send + 'static,
+        P::Message: Message + Send + 'static,
     {
         let mut options = self.config.options.unwrap_or_else(HashMap::new);
         let dist_type = options
             .entry("distribution".to_owned())
             .or_insert_with(|| "modulo".to_owned())
             .to_lowercase();
-        let distributor = distributor::configure_distributor(&dist_type)?;
+        let distributor = configure_distributor(&dist_type)?;
         debug!("[listener] using distributor '{}'", dist_type);
 
         let hash_type = options
             .entry("hash".to_owned())
             .or_insert_with(|| "fnv1a_64".to_owned())
             .to_lowercase();
-        let hasher = hasher::configure_hasher(&hash_type)?;
+        let hasher = configure_hasher(&hash_type)?;
         debug!("[listener] using hasher '{}'", hash_type);
 
-        // Assemble the list of backends and backend descriptors.
-        let mut backends = vec![];
-        let mut descriptors = vec![];
-        let (updates_tx, updates_rx) = mpsc::unbounded_channel();
-
+        // Build all of our backends for this pool.
+        let mut backends = Vec::new();
         for address in &self.config.addresses {
-            // Create the backend and the backend supervisor.  We spawn the supervisor which deals
-            // with spawning new backend connections when we're under our limit or a connection has
-            // an error and closes.  The backend itself is simply a facade to the work queue by
-            // which we submit request batches to be processed.
-            let (backend, runner) = Backend::new(
+            // TODO: generate a ketama suitable/possibly-stable string identifier by parsing the
+            // address
+            let identifier = format!("{}", address);
+            let backend = Backend::new(
                 *address,
+                identifier,
                 self.processor.clone(),
                 options.clone(),
-                updates_tx.clone(),
                 self.noreply,
-                self.close.clone(),
+                self.sink.clone(),
             )?;
-            let descriptor = backend.get_descriptor();
             backends.push(backend);
-            tokio::spawn(runner);
-
-            // The backend descriptor is a facade we pass to the distributor to provide the
-            // necessary information needed to configure the distributor without having to hold an
-            // actual reference to the backends.
-            descriptors.push(descriptor);
         }
 
-        let pool = Arc::new(BackendPool {
-            backends,
-            distributor: RwLock::new(distributor),
-            hasher,
-            sink: self.sink,
-        });
-
-        pool.update_distributor();
-
-        let supervisor = BackendPoolSupervisor {
-            pool: pool.clone(),
-            updates_rx,
-            close: self.close,
-        };
-        tokio::spawn(supervisor);
-
-        Ok(pool)
+        Ok(BackendPool::new(backends, distributor, hasher, self.noreply, self.sink))
     }
 }
 
-impl<P, C> Future for BackendPoolSupervisor<P, C>
+pub struct PoolResponse<P>
 where
-    P: Processor + Clone + Send + 'static,
-    P::Message: Send,
-    C: Future + Send,
+    P: Processor + Send + 'static,
+    P::Message: Message + Send + 'static,
 {
-    type Error = ();
-    type Item = ();
+    responses: JoinAll<Vec<ResponseFuture<P, BackendError>>>,
+    _processor: PhantomData<P>,
+}
+
+impl<P> PoolResponse<P>
+where
+    P: Processor + Send + 'static,
+    P::Message: Message + Send + 'static,
+{
+    pub fn new(responses: Vec<ResponseFuture<P, BackendError>>) -> PoolResponse<P> {
+        PoolResponse {
+            responses: join_all(responses),
+            _processor: PhantomData,
+        }
+    }
+}
+
+impl<P> Future for PoolResponse<P>
+where
+    P: Processor + Send + 'static,
+    P::Message: Message + Send + 'static,
+{
+    type Error = PoolError;
+    type Item = AssignedResponses<P::Message>;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        // If we're supposed to close, do it now.
-        if let Ok(Async::Ready(_)) = self.close.poll() {
-            return Ok(Async::Ready(()));
-        }
-
-        // Go through any update messages and batch them, setting our update marker to true if we
-        // get an actual message.
-        let mut should_update = false;
-        loop {
-            match self.updates_rx.poll() {
-                Ok(Async::NotReady) => break,
-                Ok(Async::Ready(Some(_))) => should_update = true,
-                Ok(Async::Ready(None)) => return Ok(Async::Ready(())),
-                Err(_) => return Err(()),
-            }
-        }
-
-        if should_update {
-            self.pool.update_distributor();
-        }
-
-        Ok(Async::NotReady)
-    }
-}
-
-impl<P, C> Drop for BackendPoolSupervisor<P, C>
-where
-    P: Processor + Clone + Send + 'static,
-    P::Message: Send,
-    C: Future + Send,
-{
-    fn drop(&mut self) {
-        trace!("[backend pool supervisor] dropping");
+        let result = try_ready!(self.responses.poll());
+        let flattened = result.into_iter().flatten().collect::<Vec<_>>();
+        Ok(Async::Ready(flattened))
     }
 }
