@@ -89,7 +89,24 @@ where
         }
 
         // Just drive our inner futures; we don't care about their return value.
-        while let Ok(Async::Ready(Some(_))) = self.inner.poll() {}
+        loop {
+            match self.inner.poll() {
+                // These are successful results, so we just drop the value and keep on moving on.
+                Ok(Async::Ready(Some(_))) => {},
+                // If we have no more futures to drive, and we've been instructed to close, it's
+                // time to go.
+                Ok(Async::Ready(None)) => {
+                    if self.should_close {
+                        return Ok(Async::Ready(()))
+                    } else {
+                        break
+                    }
+                },
+                Ok(Async::NotReady) => break,
+                // We don't really care about errors per se, since it's the shadow pool.
+                Err(_) => {},
+            }
+        }
 
         Ok(Async::NotReady)
     }

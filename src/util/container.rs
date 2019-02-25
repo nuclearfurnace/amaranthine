@@ -35,10 +35,10 @@ pub struct IntegerMappedVec<T> {
 impl<V> IntegerMappedVec<V> {
     pub fn new() -> Self {
         IntegerMappedVec {
-            items: Vec::new(),
-            size: 0,
+            items: vec![vec![]],
+            size: 1,
             count: 0,
-            mask: 0,
+            mask: 1,
         }
     }
 

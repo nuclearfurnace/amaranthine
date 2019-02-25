@@ -30,7 +30,7 @@ futures = "^0.1"
 net2 = "^0.2"
 libc = "^0.2"
 signal-hook = "^0.1"
-futures-turnstyle = { path = "../rust-futures-turnstyle" }
+futures-turnstyle = "^3.0"
 bytes = "^0.4"
 btoi = "^0.4"
 itoa = "^0.4"
@@ -40,7 +40,7 @@ pruefung = "^0.2"
 fnv = "^1.0"
 hotmic = "^0.7"
 slab = "^0.4"
-tokio-evacuate = { path = "../tokio-evacuate" }
+tokio-evacuate = "^1.1"
 warp = "^0.1"
 tower = { git = "https://github.com/nuclearfurnace/tower" }
 tower-service = { git = "https://github.com/nuclearfurnace/tower" }

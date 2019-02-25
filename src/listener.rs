@@ -183,7 +183,7 @@ where
 }
 
 fn build_router_chain<P, R, C>(
-    listener: TcpListener, processor: P, router: R, mut warden: Warden, close: C, sink: MetricSink<&'static str>,
+    listener: TcpListener, processor: P, router: R, warden: Warden, close: C, sink: MetricSink<&'static str>,
 ) -> Result<GenericRuntimeFuture, CreationError>
 where
     P: Processor + Clone + Send + 'static,
@@ -206,7 +206,7 @@ where
             let router = router.clone();
             let processor = processor.clone();
             let close = close.clone();
-            let mut warden2 = warden.clone();
+            let warden2 = warden.clone();
             let sink2 = sink.clone();
             let client_addr = client.peer_addr().unwrap();
             debug!("[client] {} connected", client_addr);
