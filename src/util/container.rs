@@ -34,12 +34,14 @@ pub struct IntegerMappedVec<T> {
 
 impl<V> IntegerMappedVec<V> {
     pub fn new() -> Self {
-        IntegerMappedVec {
-            items: vec![vec![]],
-            size: 1,
+        let mut vec = IntegerMappedVec {
+            items: Vec::new(),
+            size: 0,
             count: 0,
-            mask: 1,
-        }
+            mask: 0,
+        };
+        vec.expand();
+        vec
     }
 
     pub fn push(&mut self, key: usize, value: V) {

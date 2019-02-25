@@ -4,11 +4,11 @@ use std::fs::File;
 use std::io::{Error, Write};
 use std::process::{Command, Child, Stdio};
 use tempfile::{Builder, TempDir};
-use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-static PORT_OFFSET: AtomicUsize = ATOMIC_USIZE_INIT;
+static PORT_OFFSET: AtomicUsize = AtomicUsize::new(0);
 
 fn get_redis_config(stats_port: u16, listen1_port: u16, listen2_port: u16, redis1_port: u16, redis2_port: u16) -> String {
     format!(r#"
