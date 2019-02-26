@@ -17,8 +17,9 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
+use super::BackendAddress;
 use config::{Config, ConfigError, File};
-use std::{collections::HashMap, env, net::SocketAddr};
+use std::{collections::HashMap, env};
 
 #[derive(Deserialize, Default, Clone, Debug)]
 pub struct Configuration {
@@ -43,7 +44,7 @@ pub struct ListenerConfiguration {
 
 #[derive(Deserialize, Default, Clone, Debug)]
 pub struct PoolConfiguration {
-    pub addresses: Vec<SocketAddr>,
+    pub addresses: Vec<BackendAddress>,
     pub options: Option<HashMap<String, String>>,
 }
 

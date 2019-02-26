@@ -17,29 +17,41 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use slog::Level;
+use serde::de::{Deserialize, Deserializer, Error};
+use std::{fmt, net::SocketAddr};
 
-mod config;
-pub use self::config::{Configuration, ListenerConfiguration, LoggingConfiguration, PoolConfiguration};
-
-mod backend_addr;
-pub use self::backend_addr::BackendAddress;
-
-pub trait LevelExt {
-    fn from_str(&str) -> Level;
+#[derive(Debug, Clone)]
+pub struct BackendAddress {
+    pub address: SocketAddr,
+    pub identifier: String,
 }
 
-impl LevelExt for Level {
-    fn from_str(raw: &str) -> Level {
-        match raw.to_string().to_lowercase().as_str() {
-            "trace" => Level::Trace,
-            "debug" => Level::Debug,
-            "info" => Level::Info,
-            "warn" => Level::Warning,
-            "error" => Level::Error,
-            "crit" => Level::Critical,
-            "critical" => Level::Critical,
-            _ => Level::Debug,
+impl fmt::Display for BackendAddress {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{}({})", self.address, self.identifier) }
+}
+
+impl<'de> Deserialize<'de> for BackendAddress {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let mut parts = s.split(" ");
+
+        let address = parts
+            .next()
+            .ok_or(D::Error::custom("missing address"))?
+            .parse::<SocketAddr>()
+            .map_err(D::Error::custom)?;
+        let identifier = parts
+            .next()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| address.to_string().clone());
+
+        if parts.next() != None {
+            return Err(D::Error::custom("unexpected element"));
         }
+
+        Ok(BackendAddress { address, identifier })
     }
 }

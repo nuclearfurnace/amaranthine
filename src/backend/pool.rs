@@ -225,12 +225,9 @@ where
         // Build all of our backends for this pool.
         let mut backends = Vec::new();
         for address in &self.config.addresses {
-            // TODO: generate a ketama suitable/possibly-stable string identifier by parsing the
-            // address
-            let identifier = format!("{}", address);
             let backend = Backend::new(
-                *address,
-                identifier,
+                address.address,
+                address.identifier.clone(),
                 self.processor.clone(),
                 options.clone(),
                 self.noreply,
