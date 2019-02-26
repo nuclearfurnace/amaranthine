@@ -8,19 +8,8 @@ env:
 
 matrix:
   include:
-    # Linux
     - env: TARGET=aarch64-unknown-linux-gnu
-    - env: TARGET=arm-unknown-linux-gnueabi
-    - env: TARGET=armv7-unknown-linux-gnueabihf
-    # This breaks when it goes to compile rust-crypto. *shrug*
-    #- env: TARGET=i686-unknown-linux-gnu
     - env: TARGET=x86_64-unknown-linux-gnu
-
-    # OSX
-    - env:
-        - TARGET=i686-apple-darwin
-        - REDIS_BIN=/usr/local/bin/redis-server
-      os: osx
     - env:
         - TARGET=x86_64-apple-darwin
         - REDIS_BIN=/usr/local/bin/redis-server
