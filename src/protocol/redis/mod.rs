@@ -26,6 +26,9 @@ use protocol::errors::ProtocolError;
 use tokio::io::{write_all, AsyncRead, AsyncWrite, Error, ErrorKind};
 use util::Sizable;
 
+mod filtering;
+use self::filtering::check_command_validity;
+
 const MAX_OUTSTANDING_WBUF: usize = 8192;
 
 const REDIS_COMMAND_ERROR: u8 = b'-';
@@ -169,6 +172,21 @@ impl RedisMessage {
         RedisMessage::Integer(buf, value)
     }
 
+    pub fn get_command(&self) -> Option<&[u8]> {
+        match self {
+            RedisMessage::Bulk(_, ref args) => {
+                match args.get(0) {
+                    Some(RedisMessage::Data(buf, offset)) => {
+                        let end = buf.len() - 2;
+                        Some(&buf[*offset..end])
+                    },
+                    _ => None,
+                }
+            },
+            _ => None,
+        }
+    }
+
     pub fn into_resp(self) -> BytesMut {
         match self {
             RedisMessage::Null => BytesMut::from(&REDIS_NULL_BUF[..]),
@@ -298,6 +316,18 @@ where
                 // connection to the client.
                 if let RedisMessage::Quit = cmd {
                     self.closed = true;
+                }
+
+                // If this command is invalid, kill the transport.  We also give the transport
+                // owner an error message, which is inlined and so we can kill the transport while
+                // still sending an error back to the client themselves.
+                if let Some(cmd_key) = cmd.get_command() {
+                    if !check_command_validity(cmd_key) {
+                        self.closed = true;
+
+                        let emsg = RedisMessage::from_error_str("command not valid");
+                        return Ok(Async::Ready(Some(emsg)));
+                    }
                 }
 
                 Ok(Async::Ready(Some(cmd)))

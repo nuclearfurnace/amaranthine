@@ -20,11 +20,14 @@
 #![feature(test)]
 #![feature(nll)]
 #![feature(never_type)]
+#![feature(proc_macro_hygiene)]
 #![recursion_limit = "1024"]
 #![deny(unused_extern_crates)]
 
 #[macro_use]
 extern crate lazy_static;
+
+extern crate phf;
 
 #[macro_use]
 extern crate derivative;

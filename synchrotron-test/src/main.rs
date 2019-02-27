@@ -11,6 +11,7 @@ fn main() {
 mod redis_tests {
     use std::thread;
     use std::time::Duration;
+    use redis::cmd as redis_cmd;
     use redis::Client as RedisClient;
     use redis::{Commands, RedisResult, ErrorKind as RedisErrorKind};
     use daemons::get_redis_daemons;
@@ -39,6 +40,40 @@ mod redis_tests {
         let _: () = conn.set("key_three", 44).unwrap();
         let value: Vec<isize> = conn.get(&["key_one", "key_two", "key_three"]).unwrap();
         assert_eq!(value, vec![42, 43, 44]);
+    }
+
+    #[test]
+    fn test_invalid_commands() {
+        let (sd, _rd1, _rd2) = get_redis_daemons();
+
+        // Do a ping first.
+        let client = RedisClient::open(sd.get_fixed_conn_str()).unwrap();
+        let conn = client.get_connection().unwrap();
+        let ping_cmd = redis_cmd("PING");
+        let ping_result: RedisResult<String> = ping_cmd.query(&conn);
+        assert!(ping_result.is_ok());
+
+        // Now do INFO which is not supported.
+        let info_cmd = redis_cmd("INFO");
+        let info_result: RedisResult<bool> = info_cmd.query(&conn);
+        assert!(info_result.is_err());
+    }
+
+    #[test]
+    fn test_case_insensitive_commands() {
+        let (sd, _rd1, _rd2) = get_redis_daemons();
+
+        // Do a lowercase ping first.
+        let client = RedisClient::open(sd.get_fixed_conn_str()).unwrap();
+        let conn = client.get_connection().unwrap();
+        let ping_cmd = redis_cmd("ping");
+        let ping_result: RedisResult<String> = ping_cmd.query(&conn);
+        assert!(ping_result.is_ok());
+
+        // Do an uppercase ping next.
+        let ping_cmd2 = redis_cmd("PING");
+        let ping_result2: RedisResult<String> = ping_cmd2.query(&conn);
+        assert!(ping_result2.is_ok());
     }
 
     #[test]
