@@ -19,7 +19,7 @@
 // SOFTWARE.
 use bytes::BytesMut;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
-use util::Sizable;
+use crate::util::Sizable;
 
 pub trait Message: Sizable {
     fn key(&self) -> &[u8];

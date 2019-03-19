@@ -17,9 +17,9 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::processor::{Processor, ProcessorError};
+use crate::backend::processor::{Processor, ProcessorError};
 use bytes::BytesMut;
-use common::{AssignedRequests, AssignedResponse, Message, MessageResponse};
+use crate::common::{AssignedRequests, AssignedResponse, Message, MessageResponse};
 use slab::Slab;
 use std::collections::VecDeque;
 

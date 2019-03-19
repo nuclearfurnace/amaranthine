@@ -20,7 +20,7 @@
 mod fnv64a;
 mod md5;
 pub use self::{fnv64a::Fnv64aHasher, md5::MD5Hasher};
-use errors::CreationError;
+use crate::errors::CreationError;
 
 /// Basic hashing capabilities.
 ///

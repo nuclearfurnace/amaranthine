@@ -21,10 +21,10 @@ use super::{
     distributor::{configure_distributor, Distributor},
     hasher::{configure_hasher, KeyHasher},
 };
-use backend::{processor::Processor, Backend, BackendError, PoolError, ResponseFuture};
-use common::{AssignedResponses, EnqueuedRequests, Message};
-use conf::PoolConfiguration;
-use errors::CreationError;
+use crate::backend::{processor::Processor, Backend, BackendError, PoolError, ResponseFuture};
+use crate::common::{AssignedResponses, EnqueuedRequests, Message};
+use crate::conf::PoolConfiguration;
+use crate::errors::CreationError;
 use futures::{
     future::{join_all, JoinAll},
     prelude::*,
@@ -32,7 +32,7 @@ use futures::{
 use hotmic::Sink as MetricSink;
 use std::{collections::HashMap, marker::PhantomData};
 use tower_direct_service::DirectService;
-use util::IntegerMappedVec;
+use crate::util::IntegerMappedVec;
 
 type DistributorFutureSafe = Box<Distributor + Send + 'static>;
 type KeyHasherFutureSafe = Box<KeyHasher + Send + 'static>;

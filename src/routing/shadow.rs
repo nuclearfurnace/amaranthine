@@ -17,8 +17,8 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::processor::Processor;
-use common::{AssignedRequests, EnqueuedRequest, EnqueuedRequests, Message};
+use crate::backend::processor::Processor;
+use crate::common::{AssignedRequests, EnqueuedRequest, EnqueuedRequests, Message};
 use futures::{prelude::*, stream::futures_unordered::FuturesUnordered};
 use std::marker::PhantomData;
 use tokio::sync::mpsc;

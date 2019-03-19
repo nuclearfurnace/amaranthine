@@ -17,8 +17,8 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::processor::ProcessorError;
-use protocol::errors::ProtocolError;
+use crate::backend::processor::ProcessorError;
+use crate::protocol::errors::ProtocolError;
 use std::{
     error::{self, Error},
     fmt, io,

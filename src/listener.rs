@@ -17,33 +17,33 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::{
+use crate::backend::{
     pool::{BackendPool, BackendPoolBuilder},
     processor::Processor,
     redis::RedisProcessor,
 };
 use bytes::BytesMut;
-use common::{AssignedRequests, AssignedResponse, EnqueuedRequests, Message};
-use conf::ListenerConfiguration;
-use errors::CreationError;
+use crate::common::{AssignedRequests, AssignedResponse, EnqueuedRequests, Message};
+use crate::conf::ListenerConfiguration;
+use crate::errors::CreationError;
 use futures::{
     future::{lazy, ok, Shared},
     prelude::*,
 };
 use futures_turnstyle::Waiter;
 use hotmic::Sink as MetricSink;
-use metrics::get_sink;
+use crate::metrics::get_sink;
 use net2::TcpBuilder;
-use protocol::errors::ProtocolError;
-use routing::{FixedRouter, ShadowRouter};
-use service::{Pipeline, PipelineError};
+use crate::protocol::errors::ProtocolError;
+use crate::routing::{FixedRouter, ShadowRouter};
+use crate::service::{Pipeline, PipelineError};
 use std::{collections::HashMap, fmt::Display, net::SocketAddr};
 use tokio::{io, net::TcpListener, reactor};
 use tokio_evacuate::{Evacuate, Warden};
 use tokio_executor::DefaultExecutor;
 use tower_buffer::{Buffer, DirectServiceRef};
 use tower_service::Service;
-use util::typeless;
+use crate::util::typeless;
 
 type GenericRuntimeFuture = Box<Future<Item = (), Error = ()> + Send + 'static>;
 type BufferedPool<T, M> = Buffer<DirectServiceRef<BackendPool<T>>, EnqueuedRequests<M>>;

@@ -17,15 +17,15 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use backend::{message_queue::MessageQueue, processor::Processor};
+use crate::backend::{message_queue::MessageQueue, processor::Processor};
 use bytes::BytesMut;
-use common::{AssignedRequests, AssignedResponse, Message};
+use crate::common::{AssignedRequests, AssignedResponse, Message};
 use futures::prelude::*;
 use hotmic::Sink as MetricSink;
-use service::PipelineError;
+use crate::service::PipelineError;
 use std::collections::VecDeque;
 use tower_service::Service;
-use util::Batch;
+use crate::util::Batch;
 
 /// Pipeline-capable service base.
 ///

@@ -28,9 +28,9 @@ pub mod redis;
 
 pub use self::errors::{BackendError, PoolError};
 
-use backend::{distributor::BackendDescriptor, health::BackendHealth, processor::Processor};
-use common::{AssignedResponses, EnqueuedRequests, Message, PendingResponses};
-use errors::CreationError;
+use crate::backend::{distributor::BackendDescriptor, health::BackendHealth, processor::Processor};
+use crate::common::{AssignedResponses, EnqueuedRequests, Message, PendingResponses};
+use crate::errors::CreationError;
 use futures::{
     future::{join_all, ok, Either, JoinAll},
     prelude::*,
@@ -50,7 +50,7 @@ use tokio::{
     timer::{timeout::Error as TimeoutError, Timeout},
 };
 use tower_direct_service::DirectService;
-use util::ProcessFuture;
+use crate::util::ProcessFuture;
 
 type MaybeTimeout<F> = Either<NotTimeout<F>, Timeout<F>>;
 

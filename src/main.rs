@@ -101,9 +101,9 @@ mod routing;
 mod service;
 mod util;
 
-use conf::{Configuration, LevelExt};
-use errors::CreationError;
-use util::typeless;
+use crate::conf::{Configuration, LevelExt};
+use crate::errors::CreationError;
+use crate::util::typeless;
 
 enum SupervisorCommand {
     Launch,

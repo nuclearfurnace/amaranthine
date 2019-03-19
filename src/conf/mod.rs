@@ -26,7 +26,7 @@ mod backend_addr;
 pub use self::backend_addr::BackendAddress;
 
 pub trait LevelExt {
-    fn from_str(&str) -> Level;
+    fn from_str(_: &str) -> Level;
 }
 
 impl LevelExt for Level {

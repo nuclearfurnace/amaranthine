@@ -20,7 +20,7 @@
 mod modulo;
 mod random;
 pub use self::{modulo::ModuloDistributor, random::RandomDistributor};
-use errors::CreationError;
+use crate::errors::CreationError;
 
 /// A placeholder for backends.  This lets us avoid holding references to the actual backends.
 pub struct BackendDescriptor {

@@ -20,7 +20,7 @@
 use futures::{future::ok, task, Future};
 use std::time::{Duration, Instant};
 use tokio::timer::Delay;
-use util::typeless;
+use crate::util::typeless;
 
 pub struct BackendHealth {
     cooloff_enabled: bool,

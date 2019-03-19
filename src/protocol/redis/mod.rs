@@ -19,12 +19,12 @@
 // SOFTWARE.
 use btoi::btoi;
 use bytes::{BufMut, BytesMut};
-use common::{EnqueuedRequests, Message};
+use crate::common::{EnqueuedRequests, Message};
 use futures::prelude::*;
 use itoa;
-use protocol::errors::ProtocolError;
+use crate::protocol::errors::ProtocolError;
 use tokio::io::{write_all, AsyncRead, AsyncWrite, Error, ErrorKind};
-use util::Sizable;
+use crate::util::Sizable;
 
 mod filtering;
 use self::filtering::check_command_validity;
