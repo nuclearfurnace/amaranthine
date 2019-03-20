@@ -42,7 +42,7 @@ pruefung = "^0.2"
 fnv = "^1.0"
 hotmic = "^0.7"
 slab = "^0.4"
-tokio-evacuate = "^1.1"
+tokio-evacuate = "^2.0"
 warp = "^0.1"
 tower = { git = "https://github.com/nuclearfurnace/tower" }
 tower-service = { git = "https://github.com/nuclearfurnace/tower" }
