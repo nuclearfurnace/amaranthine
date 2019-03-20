@@ -22,44 +22,32 @@
 #![feature(never_type)]
 #![feature(proc_macro_hygiene)]
 #![recursion_limit = "1024"]
-#![deny(unused_extern_crates)]
 
 #[macro_use]
 extern crate lazy_static;
 
-extern crate phf;
-
 #[macro_use]
 extern crate derivative;
 
-extern crate warp;
-
-extern crate config;
-extern crate crypto;
-extern crate pruefung;
-extern crate serde;
 #[macro_use]
 extern crate serde_derive;
-extern crate slab;
+
+#[macro_use]
+extern crate futures;
 
 extern crate libc;
 extern crate signal_hook;
+extern crate futures_turnstyle;
+
+use crate::{
+    futures_turnstyle::{Turnstyle, Waiter},
+    signal_hook::iterator::Signals,
+    libc::{SIGINT, SIGUSR1},
+};
+use futures::future::{lazy, ok};
+use std::thread;
 
 extern crate tokio;
-extern crate tokio_executor;
-extern crate tokio_io_pool;
-extern crate tower_buffer;
-extern crate tower_direct_service;
-extern crate tower_service;
-#[macro_use]
-extern crate futures;
-extern crate futures_turnstyle;
-extern crate net2;
-
-use futures::future::{lazy, ok};
-use futures_turnstyle::{Turnstyle, Waiter};
-use signal_hook::iterator::Signals;
-use std::thread;
 use tokio::{
     prelude::*,
     sync::{mpsc, oneshot},
@@ -69,26 +57,16 @@ use tokio::{
 extern crate log;
 #[macro_use(slog_o)]
 extern crate slog;
-extern crate slog_async;
-extern crate slog_scope;
-extern crate slog_stdlog;
-extern crate slog_term;
 
 use slog::Drain;
 
-extern crate btoi;
 extern crate bytes;
-extern crate hotmic;
-extern crate itoa;
-extern crate rand;
 
 #[cfg(test)]
 extern crate test;
 
 #[cfg(test)]
 extern crate spectral;
-
-extern crate tokio_evacuate;
 
 mod backend;
 mod common;
@@ -101,9 +79,11 @@ mod routing;
 mod service;
 mod util;
 
-use crate::conf::{Configuration, LevelExt};
-use crate::errors::CreationError;
-use crate::util::typeless;
+use crate::{
+    conf::{Configuration, LevelExt},
+    errors::CreationError,
+    util::typeless,
+};
 
 enum SupervisorCommand {
     Launch,
@@ -114,7 +94,7 @@ enum SupervisorCommand {
 fn main() {
     // Set up our signal handling before anything else.
     let (mut supervisor_tx, supervisor_rx) = mpsc::unbounded_channel();
-    let signals = Signals::new(&[libc::SIGINT, libc::SIGUSR1]).expect("failed to register signal handlers");
+    let signals = Signals::new(&[SIGINT, SIGUSR1]).expect("failed to register signal handlers");
     thread::spawn(move || {
         // Do an initial send of the launch command to trigger actually spawning the listeners at
         // startup.
